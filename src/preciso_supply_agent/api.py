@@ -1,4 +1,4 @@
-"""FastAPI adapter for the SATURN supply-chain frontend.
+"""FastAPI adapter for the SUPPLY CENTER frontend.
 
 This module is intentionally a thin HTTP boundary.  The configured Preciso
 MCP server remains responsible for validation, persistence, and dependency
@@ -74,7 +74,7 @@ def create_app(
             yield
 
     app = FastAPI(
-        title="SATURN Supply Center API",
+        title="SUPPLY CENTER API",
         version="0.1.0",
         lifespan=lifespan,
     )
