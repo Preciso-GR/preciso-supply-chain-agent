@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "preciso-supply-agent"
+version = "0.1.0"
+description = "Deterministic, evidence-backed supply-chain dependency analysis over MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.27,<2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+preciso-supply-mcp = "preciso_supply_agent.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+

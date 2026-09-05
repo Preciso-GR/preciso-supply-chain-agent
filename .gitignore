@@ -1,0 +1,13 @@
+/.pytest_cache/
+/.ruff_cache/
+/data/
+/build/
+/dist/
+/*.egg-info/
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+PLAN.md
+docs 
+
