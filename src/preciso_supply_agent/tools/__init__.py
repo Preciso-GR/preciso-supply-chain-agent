@@ -1,2 +1,0 @@
-"""Focused MCP-facing operations."""
-

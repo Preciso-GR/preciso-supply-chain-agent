@@ -1,14 +1,11 @@
 # Attribution notice
 
-This standalone implementation was derived from the behavior and architecture of the
-PRECISO GraphRAG/MCP supply-chain Stage 2/3/4 implementation in the sibling
-`preciso-graphrag` checkout at commit `ed28057736cea77dc2b8f29fa9e22f9b693cc1de`
-on its `supply-chain-engine` branch.
+This application uses the PRECISO GraphRAG/MCP supply-chain engine at commit
+`bfb009ba70d888d7360b2cb4f0adb8bb55368e21` on its `supply-chain-engine` branch.
 
-The strict domain profile, directed relationship identity, evidence-sidecar semantics,
-single-effective-date rule, commit/readiness gate, fail-closed facility traversal,
-synthetic fixture, and curated regression expectations were adapted from that work.
-Generic GraphRAG, finance, embedding, vector-storage, and export code was not copied.
+The backend owns strict validation, directed identity, evidence, snapshot, readiness,
+and fail-closed traversal. This repository is an MCP application client and does not
+copy or reimplement that runtime.
 
 The inspected `preciso-graphrag` work is distributed under Apache License 2.0. A copy
 of that license is included in this repository. This implementation and copied fixture

@@ -1,70 +1,54 @@
-# PRECISO Supply-Chain Agent
+# Preciso Supply Chain
 
-A focused, standalone MCP server for deterministic supply-chain dependency analysis.
-It answers which products have documented dependencies on an unavailable facility,
-through which components, and which source excerpts support every edge.
+Hackathon application layer for evidence-backed supply-chain investigation.
 
-The runtime does not import or read the sibling `preciso-graphrag` or `preciso-agent`
-repositories. The first release intentionally has no vector search, generic RAG, finance
-providers, Neo4j, Qdrant, UI, or LLM extraction.
+**Powered by PRECISO**, the authoritative GraphRAG/MCP engine pinned at
+[`bfb009ba70d888d7360b2cb4f0adb8bb55368e21`](https://github.com/Preciso-GR/preciso-graphrag/commit/bfb009ba70d888d7360b2cb4f0adb8bb55368e21).
 
-## Domain contract
+This repository intentionally contains no graph store, SQLite schema, extraction engine,
+or dependency traversal. It calls Preciso's existing supply-chain MCP tools and will later
+provide the analyst UI around those supported results.
 
-Only these directed facts are accepted:
+## Current scope
 
-```text
-COMPANY -> OPERATES -> FACILITY
-FACILITY -> MANUFACTURES -> COMPONENT
-COMPONENT -> USED_IN -> PRODUCT
-```
+- `get_server_status(workspace="supply_chain")`
+- `ingest_graph_tool(..., workspace="supply_chain")`
+- `query_facility_unavailable(..., workspace="supply_chain")`
 
-Every entity and relationship must cite a chunk included in its reviewed extraction
-payload. Validation occurs before writes, and the whole document commits in one SQLite
-transaction. Queries fail closed if ingestion or path evidence is incomplete.
+The backend returns ordered facility → component → product paths, source excerpts for
+every edge, snapshot metadata, and truncation/completeness. It does not predict delay,
+inventory shortage, production stoppage, severity, or financial impact.
 
-## Install and run
+## Development setup
 
-Python 3.11 or newer is required.
+Install Preciso GraphRAG at the pinned commit in a separate checkout, then install this
+application package:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest
-.venv/bin/preciso-supply-mcp
+export PRECISO_MCP_CWD=/absolute/path/to/preciso-graphrag
+export PRECISO_MCP_COMMAND=python3
+export PRECISO_MCP_ARGS='-m preciso_mcp.server'
+export GRAPHRAG_MCP_WORKDIR=/absolute/path/to/preciso-supply-chain/data/preciso
+export GRAPHRAG_EMBEDDING_PROVIDER=fallback
 ```
 
-The server uses stdio transport by default and stores data at
-`data/supply_chain.sqlite3`. Set `PRECISO_SUPPLY_DB` to choose another SQLite path.
+The client starts the configured Preciso MCP stdio server; it does not reimplement
+backend behavior. The fallback embedding is suitable for reproducible synthetic data,
+not an Ollama embedding evaluation.
 
-The MCP surface contains exactly three tools:
+## Product direction
 
-- `get_supply_chain_status`
-- `ingest_supply_chain`
-- `investigate_facility`
+The next work is UI planning and implementation: facility selection, cited path view, and
+evidence inspection. Product reverse tracing, shared-dependency analysis, data-gap claims,
+forecasting, inventory, and live monitoring are not implemented here.
 
-`ingest_supply_chain` accepts the reviewed payload shape demonstrated by
-`fixtures/supply_chain/expected_extraction.json`. `investigate_facility` accepts a
-canonical facility ID and an optional positive `max_paths` limit.
-
-## Reproduce the curated demo
-
-From the repository root:
+## Verification
 
 ```bash
-PYTHONPATH=src python3 scripts/demo.py
+python3 -m pytest
+python3 -m ruff check src tests
 ```
-
-The demo uses the reviewed synthetic fixture. It is a deterministic engine test, not an
-LLM extraction claim. It prints the Northbridge result, unresolved Plant 7 result, and a
-missing-evidence fail-closed result against isolated temporary databases.
-
-## Product limitation
-
-Results mean **potential exposure through documented dependencies in the loaded
-snapshot**. They do not establish production stoppage, severity, financial impact,
-inventory shortage, lead-time impact, capacity, or a business-continuity outcome.
-
-See [docs/SUPPLY_CHAIN_CORE_EXTRACTION.md](docs/SUPPLY_CHAIN_CORE_EXTRACTION.md) for the
-dependency audit, architecture decision, verification evidence, and known limitations.
 
 # preciso-supply-chain-agent
