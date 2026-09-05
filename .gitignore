@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
+node_modules/
+web/dist/
 PLAN.md
 docs 
-

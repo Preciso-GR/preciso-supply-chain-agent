@@ -8,10 +8,17 @@ version = "0.1.0"
 description = "Hackathon application client powered by the Preciso GraphRAG MCP engine"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.27,<2"]
+dependencies = [
+    "mcp>=1.27,<2",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = ["httpx>=0.28,<1", "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.9"]
+
+[project.scripts]
+supply-center-api = "preciso_supply_agent.api:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
