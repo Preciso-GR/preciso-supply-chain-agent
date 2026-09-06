@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import date
+import os
 from pathlib import Path
 from typing import Any, AsyncContextManager, AsyncIterator, Callable, Literal, Protocol
 
@@ -26,6 +27,22 @@ MAX_PATHS = 1000
 MAX_DOCUMENTS = 8
 MAX_DOCUMENT_CHARACTERS = 250_000
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_local_env(path: Path = REPOSITORY_ROOT / ".env") -> None:
+    """Load simple KEY=VALUE lines for local development without a dependency."""
+
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
 
 
 class ApprovedIngestionRequest(BaseModel):
@@ -142,6 +159,7 @@ def create_app(
     keys or provider settings.
     """
 
+    load_local_env()
     factory = backend_factory or (lambda: default_backend_factory(config))
     extraction_service = extractor or ClaudeExtractor.from_environment()
     canonical_registry = registry or load_registry()
