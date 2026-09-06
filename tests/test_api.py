@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
 import pytest
 
-from preciso_supply_agent.api import create_app
+from preciso_supply_agent.api import create_app, load_local_env
 
 
 class FakeBackend:
@@ -166,6 +168,52 @@ async def test_extract_forwards_only_documents_date_and_server_registry(extracti
     assert extractor.calls[0]["documents"] == [
         {"name": "facility.md", "content": "Northbridge manufactures C-17."}
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_configuration_is_runtime_only_and_never_echoes_key(extraction_app: Any) -> None:
+    app, _ = extraction_app
+    response = await request(
+        app,
+        "POST",
+        "/api/provider",
+        json={
+            "provider": "anthropic",
+            "api_key": "local-secret",
+            "model": "claude-sonnet-5",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["extractor"] == {
+        "provider": "anthropic",
+        "configured": True,
+        "model": "claude-sonnet-5",
+    }
+    assert "local-secret" not in response.text
+
+
+def test_local_env_loader_keeps_existing_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ANTHROPIC_API_KEY=from-file\n"
+        "SUPPLY_CENTER_CLAUDE_MODEL='claude-sonnet-5'\n"
+        "EMPTY_VALUE=\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "from-shell")
+    monkeypatch.delenv("SUPPLY_CENTER_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("EMPTY_VALUE", raising=False)
+
+    load_local_env(env_file)
+
+    assert os.environ["ANTHROPIC_API_KEY"] == "from-shell"
+    assert os.environ["SUPPLY_CENTER_CLAUDE_MODEL"] == "claude-sonnet-5"
+    assert "EMPTY_VALUE" not in os.environ
 
 
 @pytest.mark.asyncio
