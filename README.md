@@ -13,6 +13,7 @@ remain in the pinned PRECISO engine.
 
 The responsive web experience is now framed as a supply-chain analyst console:
 
+- a working home screen with a `Get Started` entry into the analyst chat;
 - a setup panel for PRECISO MCP status, source documents, and local LLM provider setup;
 - a conversation-first analyst workspace for supported dependency-tracing questions;
 - local text-document upload for Markdown, text, CSV, and JSON sources;
@@ -54,11 +55,10 @@ export SUPPLY_CENTER_CLAUDE_MODEL=claude-sonnet-5
 supply-center-api
 ```
 
-You can copy `.env.example` to `.env`, but the application does not load `.env` implicitly.
-Export it into the API process (for example, `set -a; source .env; set +a`) or use your process
-manager's environment support. You can also enter an Anthropic key in the Supply Center setup
-panel; it is held in memory by the local API process and is not returned to the browser or written
-to disk. Never place the key in `web/`; Vite client variables are visible to the browser.
+The local API reads `.env` on startup for development, without overriding variables already
+exported in the shell. You can also enter an Anthropic key in the Supply Center setup panel; it is
+held in memory by the local API process and is not returned to the browser or written to disk.
+Never place the key in `web/`; Vite client variables are visible to the browser.
 
 The client starts the configured Preciso MCP stdio server; it does not reimplement
 backend behavior. In a second terminal, start the web application:
