@@ -14,7 +14,9 @@ remain in the pinned PRECISO engine.
 The responsive web experience includes:
 
 - a product homepage using the SUPPLY CENTER dependency-path identity;
-- a ChatGPT Work-style local analyst workspace;
+- a Codex-style, conversation-first local analyst workspace;
+- local text-document upload for Markdown, text, CSV, and JSON sources;
+- optional Claude extraction, configured only in the local API process;
 - table-based relationship review controls;
 - the verified Northbridge dependency-path demonstration;
 - evidence and source-chunk inspection;
@@ -30,9 +32,11 @@ The backend returns ordered facility → component → product paths, source exc
 every edge, snapshot metadata, and truncation/completeness. It does not predict delay,
 inventory shortage, production stoppage, severity, or financial impact.
 
-Raw-document upload, LLM extraction orchestration, provider selection, authentication, and
-durable application sessions are not implemented. The current workspace uses the labelled
-synthetic fixture unless the local PRECISO backend contains the Northbridge dataset.
+The browser keeps the local conversation and the latest untouched model output in local storage.
+Relationships are never ingested until they are explicitly accepted in the review list and pass
+PRECISO's strict supply-chain validation. Authentication and multi-user durable sessions are
+intentionally outside this prototype. The labelled synthetic fixture remains available when no
+Claude key is configured.
 
 ## Development setup
 
@@ -47,8 +51,15 @@ export PRECISO_MCP_COMMAND=python3
 export PRECISO_MCP_ARGS='-m preciso_mcp.server'
 export GRAPHRAG_MCP_WORKDIR=/absolute/path/to/preciso-supply-chain/data/preciso
 export GRAPHRAG_EMBEDDING_PROVIDER=fallback
+export ANTHROPIC_API_KEY=your_local_key
+export SUPPLY_CENTER_CLAUDE_MODEL=claude-sonnet-5
 supply-center-api
 ```
+
+You can copy `.env.example` to `.env`, but the application does not load `.env` implicitly.
+Export it into the API process (for example, `set -a; source .env; set +a`) or use your process
+manager's environment support. Never place the key in `web/`; Vite client variables are visible
+to the browser.
 
 The client starts the configured Preciso MCP stdio server; it does not reimplement
 backend behavior. In a second terminal, start the web application:
@@ -60,7 +71,9 @@ npm run dev
 ```
 
 Vite proxies `/api` to the local SUPPLY CENTER API on `127.0.0.1:8765`. The fallback embedding
-is suitable for reproducible synthetic data, not an Ollama embedding evaluation.
+is suitable for reproducible synthetic data, not an Ollama embedding evaluation. Without an
+Anthropic key, the curated review, ingestion, deterministic query, and evidence workflows still
+run; only fresh model extraction is disabled.
 
 Product reverse tracing, shared-dependency analysis, data-gap claims, forecasting,
 inventory, and live monitoring are not implemented here.

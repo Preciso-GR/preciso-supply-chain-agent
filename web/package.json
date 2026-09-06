@@ -1,5 +1,5 @@
 {
-  "name": "saturn-supply-center-web",
+  "name": "supply-center-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,8 +10,5 @@
   },
   "devDependencies": {
     "vite": "^6.1.0"
-  },
-  "dependencies": {
-    "three": "^0.179.1"
   }
 }

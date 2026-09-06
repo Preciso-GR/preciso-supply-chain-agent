@@ -18,6 +18,26 @@ class FakeBackend:
         return {"tool": tool_name, "arguments": arguments}
 
 
+class FakeExtractor:
+    configured = True
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def status(self) -> dict[str, Any]:
+        return {"provider": "test", "configured": True, "model": "test-model"}
+
+    async def extract(self, documents, *, snapshot_effective_date, registry):
+        self.calls.append(
+            {
+                "documents": documents,
+                "snapshot_effective_date": snapshot_effective_date,
+                "registry": registry,
+            }
+        )
+        return {"status": "success", "payload": {"document_id": "extracted"}}
+
+
 @pytest.fixture
 def fake_backend() -> FakeBackend:
     return FakeBackend()
@@ -30,6 +50,28 @@ def app(fake_backend: FakeBackend):
         yield fake_backend
 
     return create_app(factory)
+
+
+@pytest.fixture
+def extraction_app(fake_backend: FakeBackend):
+    extractor = FakeExtractor()
+    registry = {
+        "entities": [
+            {
+                "canonical_id": "facility:arkon-components:northbridge",
+                "entity_type": "FACILITY",
+                "display_name": "Northbridge Fabrication Facility",
+                "documented_aliases": [],
+            }
+        ],
+        "ambiguous_aliases": [{"alias": "Plant 7", "status": "unresolved"}],
+    }
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[FakeBackend]:
+        yield fake_backend
+
+    return create_app(factory, extractor=extractor, registry=registry), extractor
 
 
 async def request(app, method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -105,3 +147,43 @@ async def test_investigation_get_route_and_bounds(app: Any, fake_backend: FakeBa
         json={"facility_id": "facility:northbridge", "max_paths": 0},
     )
     assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_extract_forwards_only_documents_date_and_server_registry(extraction_app: Any) -> None:
+    app, extractor = extraction_app
+    response = await request(
+        app,
+        "POST",
+        "/api/extract",
+        json={
+            "snapshot_effective_date": "2026-01-15",
+            "documents": [{"name": "facility.md", "content": "Northbridge manufactures C-17."}],
+        },
+    )
+    assert response.status_code == 200
+    assert extractor.calls[0]["snapshot_effective_date"] == "2026-01-15"
+    assert extractor.calls[0]["documents"] == [
+        {"name": "facility.md", "content": "Northbridge manufactures C-17."}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_resolves_facility_and_preserves_ambiguous_identity(extraction_app: Any, fake_backend: FakeBackend) -> None:
+    app, _ = extraction_app
+    resolved = await request(
+        app,
+        "POST",
+        "/api/chat",
+        json={"message": "What is exposed if Northbridge Fabrication Facility is unavailable?"},
+    )
+    ambiguous = await request(
+        app,
+        "POST",
+        "/api/chat",
+        json={"message": "What is exposed if Plant 7 is unavailable?"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["intent"] == "facility_unavailable"
+    assert fake_backend.calls[-1][1]["facility_id"] == "facility:arkon-components:northbridge"
+    assert ambiguous.json()["status"] == "ambiguous_identity"
