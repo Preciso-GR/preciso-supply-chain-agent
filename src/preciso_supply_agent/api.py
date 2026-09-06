@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import date
-import json
 from pathlib import Path
 from typing import Any, AsyncContextManager, AsyncIterator, Callable, Literal, Protocol
 
@@ -27,9 +26,6 @@ MAX_PATHS = 1000
 MAX_DOCUMENTS = 8
 MAX_DOCUMENT_CHARACTERS = 250_000
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-SAMPLE_EXTRACTION_PATH = (
-    REPOSITORY_ROOT / "fixtures" / "supply_chain" / "expected_extraction.json"
-)
 
 
 class ApprovedIngestionRequest(BaseModel):
@@ -74,6 +70,25 @@ class ExtractionRequest(BaseModel):
 
     snapshot_effective_date: date
     documents: list[SourceDocument] = Field(min_length=1, max_length=MAX_DOCUMENTS)
+
+
+class ProviderConfigurationRequest(BaseModel):
+    """Runtime LLM provider configuration for the local API process.
+
+    The key is intentionally accepted only by the local FastAPI process and is
+    never returned to the browser or written to disk.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["anthropic"]
+    api_key: str = Field(min_length=1, max_length=4000)
+    model: str = Field(default="claude-sonnet-5", min_length=1, max_length=120)
+
+    @field_validator("api_key", "model", mode="before")
+    @classmethod
+    def strip_secret_fields(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class ChatRequest(BaseModel):
@@ -135,6 +150,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with factory() as backend:
             app.state.application = SupplyChainApplication(backend)
+            app.state.extraction_service = extraction_service
             yield
 
     app = FastAPI(
@@ -146,10 +162,25 @@ def create_app(
     def application() -> SupplyChainApplication:
         return app.state.application
 
+    def current_extractor() -> Extractor:
+        return app.state.extraction_service
+
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
         engine = await application().status()
-        return {"engine": engine, "extractor": extraction_service.status()}
+        return {"engine": engine, "extractor": current_extractor().status()}
+
+    @app.post("/api/provider")
+    async def configure_provider(request: ProviderConfigurationRequest) -> dict[str, Any]:
+        app.state.extraction_service = ClaudeExtractor(
+            api_key=request.api_key,
+            model=request.model,
+        )
+        return {
+            "status": "success",
+            "extractor": current_extractor().status(),
+            "notice": "Provider configured in memory for this local API process.",
+        }
 
     @app.get("/api/capabilities")
     async def capabilities() -> dict[str, Any]:
@@ -163,27 +194,19 @@ def create_app(
         ]
         return {
             "workspace": "supply_chain",
-            "extractor": extraction_service.status(),
+            "extractor": current_extractor().status(),
             "facilities": facilities,
             "supported_intents": ["facility_unavailable"],
             "unsupported": ["forecasting", "inventory", "severity", "delay_prediction"],
         }
 
-    @app.get("/api/sample")
-    async def sample() -> dict[str, Any]:
-        return {
-            "status": "success",
-            "mode": "curated_sample",
-            "notice": "Manually authored fixture; not evidence of extraction accuracy.",
-            "payload": json.loads(SAMPLE_EXTRACTION_PATH.read_text(encoding="utf-8")),
-        }
-
     @app.post("/api/extract")
     async def extract(request: ExtractionRequest) -> dict[str, Any]:
-        if not extraction_service.configured:
-            raise HTTPException(status_code=503, detail=extraction_service.status())
+        extractor_service = current_extractor()
+        if not extractor_service.configured:
+            raise HTTPException(status_code=503, detail=extractor_service.status())
         try:
-            return await extraction_service.extract(
+            return await extractor_service.extract(
                 [document.model_dump() for document in request.documents],
                 snapshot_effective_date=request.snapshot_effective_date.isoformat(),
                 registry=canonical_registry,
