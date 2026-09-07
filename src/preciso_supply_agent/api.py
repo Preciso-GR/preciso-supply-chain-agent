@@ -308,6 +308,16 @@ def create_app(
             "answer": snapshot.state.get("final_answer"),
         }
 
+    def started_run_response(*, thread_id: str, run_id: str) -> dict[str, Any]:
+        return {
+            "status": "running",
+            "thread_id": thread_id,
+            "conversation_id": thread_id,
+            "run_id": run_id,
+            "awaiting_approval": False,
+            "events_url": f"/api/events/{run_id}",
+        }
+
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
         engine = await application().status()
@@ -454,8 +464,8 @@ def create_app(
         }
         if request.documents is not None:
             initial["uploaded_sources"] = source_records(request.documents)
-        snapshot = await agent_runtime().run(thread_id, initial)
-        return run_response(snapshot)
+        run_id = await agent_runtime().start(thread_id, initial)
+        return started_run_response(thread_id=thread_id, run_id=run_id)
 
     @app.get("/api/runs/{thread_id}")
     async def get_agent_run(thread_id: str) -> dict[str, Any]:
@@ -467,23 +477,21 @@ def create_app(
     @app.post("/api/runs/{thread_id}/approval")
     async def approve_agent_run(thread_id: str, request: ApprovalRequest) -> dict[str, Any]:
         try:
-            snapshot = await agent_runtime().resume(thread_id, approved=request.approved)
+            run_id = await agent_runtime().resume_live(thread_id, approved=request.approved)
         except Exception as exc:
             raise HTTPException(status_code=409, detail=f"Run could not be resumed: {exc}") from exc
-        return run_response(snapshot)
+        return started_run_response(thread_id=thread_id, run_id=run_id)
 
-    @app.get("/api/runs/{thread_id}/events")
-    async def agent_events(thread_id: str) -> StreamingResponse:
+    @app.get("/api/events/{run_id}")
+    async def agent_events(run_id: str) -> StreamingResponse:
         try:
-            snapshot = await agent_runtime().snapshot(thread_id)
+            agent_runtime().run_for_id(run_id)
         except Exception as exc:
             raise HTTPException(status_code=404, detail=f"Run not found: {exc}") from exc
 
         async def stream() -> AsyncIterator[str]:
-            for event in snapshot.state.get("events", []):
+            async for event in agent_runtime().events(run_id):
                 yield f"event: {event.get('type', 'execution')}\ndata: {json.dumps(event)}\n\n"
-            terminal = {"type": "run.status", "status": snapshot.status}
-            yield f"event: run.status\ndata: {json.dumps(terminal)}\n\n"
 
         return StreamingResponse(
             stream(),
