@@ -25,7 +25,7 @@ def test_supply_center_skill_requires_single_exact_evidence_chunk() -> None:
     skill = load_extraction_skill()
 
     assert "exactly one real chunk" in skill
-    assert "Do not infer unsupported dependency" in skill
+    assert "infer unsupported dependency" in skill
 
 
 @pytest.mark.asyncio

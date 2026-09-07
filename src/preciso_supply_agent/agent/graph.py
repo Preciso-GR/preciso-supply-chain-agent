@@ -7,6 +7,7 @@ graph; those operations remain PRECISO MCP calls.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +15,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from preciso_supply_agent.agent.artifacts import ExtractionArtifactStore
+from preciso_supply_agent.agent.artifacts import ExtractionArtifactStore, ExtractionPatch
 from preciso_supply_agent.agent.state import (
     SupplyAgentState,
     execution_event,
@@ -22,7 +23,6 @@ from preciso_supply_agent.agent.state import (
 from preciso_supply_agent.application import SupplyChainApplication
 from preciso_supply_agent.documents.readers import read_source
 from preciso_supply_agent.extraction import ExtractionError
-
 
 MAX_REPAIR_ATTEMPTS = 2
 
@@ -80,6 +80,40 @@ def _append_error(
     return updated
 
 
+def _is_extraction_only_request(query: str) -> bool:
+    """Recognize UI instructions that request preparation, not graph analysis."""
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+    if not normalized:
+        return True
+    tokens = set(normalized.split())
+    extraction_words = {"extract", "prepare", "review", "ingest", "ingested"}
+    extraction_phrases = ("build the graph", "create the graph")
+    question_words = {
+        "what",
+        "which",
+        "who",
+        "where",
+        "when",
+        "why",
+        "how",
+        "does",
+        "is",
+        "are",
+        "can",
+        "show",
+        "depends",
+        "exposed",
+        "query",
+        "trace",
+    }
+    has_extraction_language = bool(tokens & extraction_words) or any(
+        phrase in normalized for phrase in extraction_phrases
+    )
+    has_question_language = bool(tokens & question_words) or "tell me" in normalized
+    return has_extraction_language and not has_question_language
+
+
 def _intent(state: SupplyAgentState) -> str:
     query = state.get("user_query", "").strip()
     statuses = state.get("source_statuses", {})
@@ -97,7 +131,11 @@ def _intent(state: SupplyAgentState) -> str:
         for source_id, validation in state.get("validation_results", {}).items()
     )
     if has_pending or has_reviewable:
-        return "new_sources_and_query" if query else "new_sources"
+        return (
+            "new_sources"
+            if _is_extraction_only_request(query)
+            else "new_sources_and_query"
+        )
     return "graph_query" if query else "new_sources"
 
 
@@ -129,10 +167,20 @@ def create_supply_graph(
         started = _status_event(state, "preciso.status.started", node=node)
         try:
             status = await dependencies.application.status()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a node must preserve partial per-source state
             message = f"PRECISO is unavailable: {exc}"
             return {
                 "preciso_status": {"overall": "error", "error": message},
+                "errors": [*state.get("errors", []), message],
+                "events": [
+                    started,
+                    _status_event(state, "preciso.status.failed", node=node, data={"error": message}),
+                ],
+            }
+        if not isinstance(status, dict) or status.get("overall") not in {"ready", "degraded"}:
+            message = "PRECISO returned an unusable server status"
+            return {
+                "preciso_status": {"overall": "error", "raw": status, "error": message},
                 "errors": [*state.get("errors", []), message],
                 "events": [
                     started,
@@ -170,6 +218,7 @@ def create_supply_graph(
 
     async def prepare_sources(state: SupplyAgentState) -> dict[str, Any]:
         statuses = dict(state.get("source_statuses", {}))
+        processed = list(state.get("processed_source_ids", []))
         sources = []
         extraction_results = state.get("extraction_results", {})
         ingestion_results = state.get("ingestion_results", {})
@@ -180,6 +229,8 @@ def create_supply_graph(
             status = statuses.get(source_id, "uploaded")
             if source_id in ingestion_results or ingestion_results.get(source_id, {}).get("status") == "success":
                 status = "ingested"
+                if source_id not in processed:
+                    processed.append(source_id)
             elif source_id in extraction_results and status == "uploaded":
                 status = "extracted"
             source["status"] = status
@@ -194,7 +245,13 @@ def create_supply_graph(
             node="prepare_sources",
             data={"source_count": len(sources), "to_process": to_process},
         )
-        return {"uploaded_sources": sources, "source_statuses": statuses, "sources_to_process": to_process, "events": [event]}
+        return {
+            "uploaded_sources": sources,
+            "source_statuses": statuses,
+            "sources_to_process": to_process,
+            "processed_source_ids": processed,
+            "events": [event],
+        }
 
     async def read_sources(state: SupplyAgentState) -> dict[str, Any]:
         source_map = _source_by_id(state)
@@ -226,7 +283,7 @@ def create_supply_graph(
                         source_name=source["name"],
                     )
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate unreadable sources
                 message = f"Could not read {source['name']}: {exc}"
                 statuses[source_id] = "failed"
                 errors = _append_error(errors, source_id, [message])
@@ -253,11 +310,17 @@ def create_supply_graph(
             if source_id not in state.get("read_sources", {}):
                 continue
             source = source_map[source_id]
+            read_source_record = state.get("read_sources", {}).get(source_id, {})
             document = {
                 "name": source["name"],
-                "content": source["content"],
+                "content": read_source_record.get("content", ""),
                 "source_id": source_id,
             }
+            if not document["content"]:
+                message = f"Could not extract {source['name']}: source content is unavailable"
+                statuses[source_id] = "failed"
+                errors = _append_error(errors, source_id, [message])
+                continue
             events.append(
                 execution_event(
                     "extraction.started",
@@ -320,7 +383,7 @@ def create_supply_graph(
                         ),
                     ]
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate model failures per source
                 message = f"Could not extract {source['name']}: {exc}"
                 statuses[source_id] = "failed"
                 errors = _append_error(errors, source_id, [message])
@@ -346,6 +409,7 @@ def create_supply_graph(
             if source_id in state.get("ingestion_results", {}):
                 continue
             source_name = extraction.get("source_name", source_id)
+            is_revalidation = state.get("extraction_attempts", {}).get(source_id, 0) > 1
             events.append(
                 execution_event(
                     "validation.started",
@@ -355,6 +419,17 @@ def create_supply_graph(
                     source_name=source_name,
                 )
             )
+            if is_revalidation:
+                events.append(
+                    execution_event(
+                        "extraction.revalidation.started",
+                        run_id=state.get("run_id"),
+                        node="validate_extractions",
+                        source_id=source_id,
+                        source_name=source_name,
+                        data={"attempt": state.get("extraction_attempts", {}).get(source_id)},
+                    )
+                )
             try:
                 raw = await dependencies.application.validate_extraction(extraction["artifact_path"])
                 if _is_success(raw):
@@ -371,6 +446,17 @@ def create_supply_graph(
                             data={"status": "valid"},
                         )
                     )
+                    if is_revalidation:
+                        events.append(
+                            execution_event(
+                                "extraction.revalidation.completed",
+                                run_id=state.get("run_id"),
+                                node="validate_extractions",
+                                source_id=source_id,
+                                source_name=source_name,
+                                data={"status": "valid"},
+                            )
+                        )
                 else:
                     validation_errors = _validation_errors(raw)
                     result = {
@@ -391,8 +477,29 @@ def create_supply_graph(
                             data={"errors": validation_errors},
                         )
                     )
+                    events.append(
+                        execution_event(
+                            "extraction.validation_failed",
+                            run_id=state.get("run_id"),
+                            node="validate_extractions",
+                            source_id=source_id,
+                            source_name=source_name,
+                            data={"errors": validation_errors},
+                        )
+                    )
+                    if is_revalidation:
+                        events.append(
+                            execution_event(
+                                "extraction.revalidation.completed",
+                                run_id=state.get("run_id"),
+                                node="validate_extractions",
+                                source_id=source_id,
+                                source_name=source_name,
+                                data={"status": "invalid", "errors": validation_errors},
+                            )
+                        )
                 results[source_id] = result
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - preserve validation failures in state
                 message = f"PRECISO validation failed for {source_name}: {exc}"
                 statuses[source_id] = "validation_failed"
                 errors = _append_error(errors, source_id, [message])
@@ -407,6 +514,27 @@ def create_supply_graph(
                         data={"errors": [message]},
                     )
                 )
+                events.append(
+                    execution_event(
+                        "extraction.validation_failed",
+                        run_id=state.get("run_id"),
+                        node="validate_extractions",
+                        source_id=source_id,
+                        source_name=source_name,
+                        data={"errors": [message]},
+                    )
+                )
+                if is_revalidation:
+                    events.append(
+                        execution_event(
+                            "extraction.revalidation.completed",
+                            run_id=state.get("run_id"),
+                            node="validate_extractions",
+                            source_id=source_id,
+                            source_name=source_name,
+                            data={"status": "invalid", "errors": [message]},
+                        )
+                    )
         if valid_ids:
             for source_id in valid_ids:
                 statuses[source_id] = "awaiting_approval"
@@ -432,6 +560,7 @@ def create_supply_graph(
         attempts = dict(state.get("extraction_attempts", {}))
         errors = {key: list(value) for key, value in state.get("extraction_errors", {}).items()}
         statuses = dict(state.get("source_statuses", {}))
+        repair_history = list(state.get("repair_history", []))
         events = []
         for source_id, validation in state.get("validation_results", {}).items():
             if validation.get("status") != "validation_failed" or attempts.get(source_id, 0) >= MAX_REPAIR_ATTEMPTS + 1:
@@ -440,6 +569,7 @@ def create_supply_graph(
             extraction = results.get(source_id)
             if not source or not extraction:
                 continue
+            attempt = attempts.get(source_id, 0) + 1
             events.append(
                 execution_event(
                     "extraction.repair.started",
@@ -447,29 +577,97 @@ def create_supply_graph(
                     node="repair_extractions",
                     source_id=source_id,
                     source_name=source["name"],
-                    data={"attempt": attempts.get(source_id, 0)},
+                    data={"attempt": attempt},
                 )
             )
-            attempts[source_id] = attempts.get(source_id, 0) + 1
+            attempts[source_id] = attempt
+            patch: ExtractionPatch | None = None
+            edit_started = False
+            edit_succeeded = False
             try:
                 if not hasattr(dependencies.extractor, "repair_document"):
                     raise ExtractionError("Configured extractor does not support bounded repair")
                 repaired = await dependencies.extractor.repair_document(
-                    {"name": source["name"], "content": source["content"], "source_id": source_id},
+                    {
+                        "name": source["name"],
+                        "content": state.get("read_sources", {}).get(source_id, {}).get("content", ""),
+                        "source_id": source_id,
+                    },
                     extraction["payload"],
                     validation.get("errors", []),
                     snapshot_effective_date=state.get("snapshot_effective_date", ""),
                     registry=dependencies.registry,
                 )
-                payload = repaired.get("payload", repaired)
-                if not isinstance(payload, dict):
-                    raise ExtractionError("Repair returned a non-object payload")
-                payload = dict(payload)
-                payload["document_id"] = f"document:{source_id}"
-                payload["file_path"] = source["name"]
-                artifact = dependencies.artifacts.write(source["name"], source_id, payload)
-                results[source_id] = {**extraction, "payload": payload, **artifact, "status": "extracted"}
+                raw_patch = repaired.get("patch", repaired) if isinstance(repaired, dict) else repaired
+                if not isinstance(raw_patch, dict):
+                    raise ExtractionError("Repair returned a non-object structured patch")
+                patch = ExtractionPatch.from_payload(raw_patch)
+                events.append(
+                    execution_event(
+                        "extraction.patch.generated",
+                        run_id=state.get("run_id"),
+                        node="repair_extractions",
+                        source_id=source_id,
+                        source_name=source["name"],
+                        data={
+                            "attempt": attempt,
+                            "operation": patch.operation,
+                            "target": patch.match,
+                        },
+                    )
+                )
+                events.append(
+                    execution_event(
+                        "extraction.edit.started",
+                        run_id=state.get("run_id"),
+                        node="repair_extractions",
+                        source_id=source_id,
+                        source_name=source["name"],
+                        data={"attempt": attempt, "operation": patch.operation},
+                    )
+                )
+                edit_started = True
+                edit_result = dependencies.artifacts.edit_extraction(
+                    extraction["artifact_path"], patch
+                )
+                if edit_result.get("status") != "success":
+                    raise ExtractionError(
+                        f"Structured edit failed: {edit_result.get('reason', 'unknown_error')}"
+                    )
+                edit_succeeded = True
+                events.append(
+                    execution_event(
+                        "extraction.edit.completed",
+                        run_id=state.get("run_id"),
+                        node="repair_extractions",
+                        source_id=source_id,
+                        source_name=source["name"],
+                        data={
+                            "attempt": attempt,
+                            "operation": patch.operation,
+                            "changed": edit_result.get("changed", 0),
+                        },
+                    )
+                )
+                payload = dependencies.artifacts.read_payload(extraction["artifact_path"])
+                results[source_id] = {
+                    **extraction,
+                    "payload": payload,
+                    "status": "extracted",
+                }
                 statuses[source_id] = "extracted"
+                repair_history.append(
+                    {
+                        "attempt": attempt,
+                        "timestamp": events[-1]["timestamp"],
+                        "source_id": source_id,
+                        "source_name": source["name"],
+                        "validation_errors": list(validation.get("errors", [])),
+                        "operation": patch.operation,
+                        "target": dict(patch.match),
+                        "status": "success",
+                    }
+                )
                 events.append(
                     execution_event(
                         "extraction.repair.completed",
@@ -477,13 +675,43 @@ def create_supply_graph(
                         node="repair_extractions",
                         source_id=source_id,
                         source_name=source["name"],
-                        data={"attempt": attempts[source_id]},
+                        data={
+                            "attempt": attempts[source_id],
+                            "operation": patch.operation,
+                            "target": patch.match,
+                        },
                     )
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - keep repair bounded and per source
                 message = f"Could not repair {source['name']}: {exc}"
                 errors = _append_error(errors, source_id, [message])
                 statuses[source_id] = "validation_failed"
+                if edit_started and not edit_succeeded and patch is not None:
+                    events.append(
+                        execution_event(
+                            "extraction.edit.failed",
+                            run_id=state.get("run_id"),
+                            node="repair_extractions",
+                            source_id=source_id,
+                            source_name=source["name"],
+                            data={
+                                "attempt": attempt,
+                                "operation": patch.operation,
+                                "error": message,
+                            },
+                        )
+                    )
+                repair_history.append(
+                    {
+                        "attempt": attempt,
+                        "timestamp": execution_event("repair.failed")["timestamp"],
+                        "source_id": source_id,
+                        "source_name": source["name"],
+                        "validation_errors": list(validation.get("errors", [])),
+                        "status": "failed",
+                        "error": message,
+                    }
+                )
                 events.append(
                     execution_event(
                         "extraction.repair.failed",
@@ -494,7 +722,14 @@ def create_supply_graph(
                         data={"error": message, "attempt": attempts[source_id]},
                     )
                 )
-        return {"extraction_results": results, "extraction_attempts": attempts, "source_statuses": statuses, "extraction_errors": errors, "events": events}
+        return {
+            "extraction_results": results,
+            "extraction_attempts": attempts,
+            "source_statuses": statuses,
+            "extraction_errors": errors,
+            "repair_history": repair_history,
+            "events": events,
+        }
 
     async def approval_gate(state: SupplyAgentState) -> dict[str, Any]:
         valid_ids = [
@@ -548,6 +783,7 @@ def create_supply_graph(
     async def ingest_extractions(state: SupplyAgentState) -> dict[str, Any]:
         results = dict(state.get("ingestion_results", {}))
         statuses = dict(state.get("source_statuses", {}))
+        processed = list(state.get("processed_source_ids", []))
         events = []
         for source_id in state.get("approved_extraction_ids", []):
             extraction = state.get("extraction_results", {}).get(source_id)
@@ -574,6 +810,8 @@ def create_supply_graph(
                     "raw": raw,
                 }
                 statuses[source_id] = "ingested"
+                if source_id not in processed:
+                    processed.append(source_id)
                 events.append(
                     execution_event(
                         "ingestion.completed",
@@ -583,7 +821,7 @@ def create_supply_graph(
                         source_name=source_name,
                     )
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - keep other approved sources progressing
                 message = f"PRECISO ingestion failed for {source_name}: {exc}"
                 results[source_id] = {"source_id": source_id, "source_name": source_name, "status": "failed", "error": message}
                 statuses[source_id] = "failed"
@@ -597,11 +835,16 @@ def create_supply_graph(
                         data={"error": message},
                     )
                 )
-        return {"ingestion_results": results, "source_statuses": statuses, "events": events}
+        return {
+            "ingestion_results": results,
+            "source_statuses": statuses,
+            "processed_source_ids": processed,
+            "events": events,
+        }
 
     async def query_preciso(state: SupplyAgentState) -> dict[str, Any]:
         query = state.get("user_query", "").strip()
-        if not query:
+        if not query or state.get("intent") == "new_sources":
             return {"query_result": {"status": "not_requested"}, "grounded_context": None}
         started = _status_event(state, "graph.query.started", node="query_preciso")
         try:
@@ -627,7 +870,7 @@ def create_supply_graph(
                     ),
                 ],
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - convert backend failure into grounded state
             message = f"PRECISO graph query failed: {exc}"
             return {
                 "query_result": {"status": "error", "message": message},
@@ -641,8 +884,24 @@ def create_supply_graph(
 
     async def synthesize_answer(state: SupplyAgentState) -> dict[str, Any]:
         query = state.get("user_query", "").strip()
-        if not query:
-            answer = "The validated source artifacts are ready for review; no graph question was requested."
+        if not query or state.get("intent") == "new_sources":
+            if state.get("rejected_extraction_ids"):
+                answer = "No graph update was made because the validated extraction was not approved."
+            elif any(
+                result.get("status") == "success"
+                for result in state.get("ingestion_results", {}).values()
+            ):
+                answer = (
+                    "The source artifacts were approved and ingested into PRECISO; "
+                    "no graph question was requested."
+                )
+            elif any(
+                result.get("status") in {"valid", "validated", "success"}
+                for result in state.get("validation_results", {}).values()
+            ):
+                answer = "The validated source artifacts are ready for review; no graph question was requested."
+            else:
+                answer = "The source artifacts could not be validated; no graph update was made."
             return {
                 "final_answer": answer,
                 "events": [_status_event(state, "answer.completed", node="synthesize_answer")],
@@ -660,13 +919,19 @@ def create_supply_graph(
                     started,
                     _status_event(
                         state,
+                        "answer.token",
+                        node="synthesize_answer",
+                        data={"text": answer, "final": True, "streamed": False},
+                    ),
+                    _status_event(
+                        state,
                         "answer.completed",
                         node="synthesize_answer",
                         data={"grounded": bool(context)},
                     ),
                 ],
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - return an explicit synthesis failure
             message = f"Grounded answer synthesis failed: {exc}"
             return {
                 "final_answer": "I could not produce a grounded answer from the available PRECISO evidence.",
@@ -690,7 +955,12 @@ def create_supply_graph(
             return "read_sources"
         if any(value.get("status") == "valid" for value in state.get("validation_results", {}).values()):
             return "approval_gate"
-        return "query_preciso" if state.get("user_query", "").strip() else "synthesize_answer"
+        return (
+            "query_preciso"
+            if state.get("intent") == "new_sources_and_query"
+            and state.get("user_query", "").strip()
+            else "synthesize_answer"
+        )
 
     def route_after_validation(state: SupplyAgentState) -> str:
         for source_id, validation in state.get("validation_results", {}).items():
@@ -698,10 +968,27 @@ def create_supply_graph(
                 return "repair_extractions"
         if any(value.get("status") == "valid" for value in state.get("validation_results", {}).values()):
             return "approval_gate"
-        return "query_preciso" if state.get("user_query", "").strip() else "synthesize_answer"
+        return (
+            "query_preciso"
+            if state.get("intent") == "new_sources_and_query"
+            and state.get("user_query", "").strip()
+            else "synthesize_answer"
+        )
 
     def route_after_approval(state: SupplyAgentState) -> str:
-        return "ingest_extractions" if state.get("approved_extraction_ids") else ("query_preciso" if state.get("user_query", "").strip() else "synthesize_answer")
+        return (
+            "ingest_extractions"
+            if state.get("approved_extraction_ids")
+            else (
+                "query_preciso"
+                if state.get("intent") == "new_sources_and_query"
+                and state.get("user_query", "").strip()
+                else "synthesize_answer"
+            )
+        )
+
+    def route_after_ingestion(state: SupplyAgentState) -> str:
+        return "query_preciso" if state.get("intent") == "new_sources_and_query" else "synthesize_answer"
 
     builder = StateGraph(SupplyAgentState)
     builder.add_node("initialize_run", initialize_run)
@@ -728,7 +1015,7 @@ def create_supply_graph(
     builder.add_conditional_edges("validate_extractions", route_after_validation)
     builder.add_edge("repair_extractions", "validate_extractions")
     builder.add_conditional_edges("approval_gate", route_after_approval)
-    builder.add_edge("ingest_extractions", "query_preciso")
+    builder.add_conditional_edges("ingest_extractions", route_after_ingestion)
     builder.add_edge("query_preciso", "synthesize_answer")
     builder.add_edge("synthesize_answer", END)
     builder.add_edge("failure", END)
