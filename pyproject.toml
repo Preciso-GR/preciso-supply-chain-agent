@@ -26,6 +26,9 @@ supply-center-api = "preciso_supply_agent.api:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"preciso_supply_agent.agent" = ["*.md", "prompts/*.md"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 asyncio_mode = "auto"

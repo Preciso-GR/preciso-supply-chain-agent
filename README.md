@@ -22,11 +22,27 @@ The responsive web experience is now framed as a supply-chain analyst console:
 - evidence and source-chunk inspection;
 - explicit MCP, provider, extraction, ingestion, and evidence states.
 
-The local HTTP API delegates these operations to PRECISO:
+The stateful `/api/runs` workflow is backed by an explicit LangGraph
+`StateGraph`. It persists conversation and workflow state with the SQLite
+LangGraph checkpointer, pauses with a real LangGraph interrupt before
+ingestion, resumes with the same conversation/thread ID, and exposes the
+checkpointed execution events through `/api/runs/{thread_id}/events`.
+
+The normal LangGraph workflow delegates these operations to PRECISO:
 
 - `get_server_status(workspace="supply_chain")`
-- `ingest_graph_tool(..., workspace="supply_chain")`
-- `query_facility_unavailable(..., workspace="supply_chain")`
+- `validate_extraction(file_path=..., workspace="supply_chain")`
+- `ingest_from_file(file_path=..., workspace="supply_chain")`
+- `query_graph_tool(query=..., mode="mix", workspace="supply_chain")`
+
+The older `/api/ingest`, `/api/investigate`, and `/api/chat` routes remain
+compatibility adapters for existing clients; new browser sessions use the
+LangGraph run endpoints.
+
+Every uploaded source is extracted and written independently as
+`{source_stem}_extracted.json`. Supply Center owns these artifacts and review
+state; PRECISO owns validation, merging, embeddings, persistence, retrieval,
+and evidence. There is no Supply Center embedding or vector-store layer.
 
 The backend returns ordered facility → component → product paths, source excerpts for
 every edge, snapshot metadata, and truncation/completeness. It does not predict delay,
