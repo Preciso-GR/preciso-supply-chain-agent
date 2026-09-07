@@ -16,6 +16,7 @@ import httpx
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+EXTRACTION_SKILL_PATH = REPOSITORY_ROOT / "skills" / "preciso-supply-center-extraction" / "SKILL.md"
 REGISTRY_PATH = REPOSITORY_ROOT / "fixtures" / "supply_chain" / "canonical_id_registry.json"
 
 
@@ -25,6 +26,11 @@ class ExtractionError(RuntimeError):
 
 def load_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_extraction_skill(path: Path = EXTRACTION_SKILL_PATH) -> str:
+    """Load the repo-local extraction contract used in the Claude system prompt."""
+    return path.read_text(encoding="utf-8")
 
 
 def _extract_json(raw_output: str) -> dict[str, Any]:
@@ -88,24 +94,7 @@ class ClaudeExtractor:
                 "CLAUDE_API_KEY) on the API process."
             )
 
-        system = """You extract documented supply-chain facts into Preciso's strict JSON contract.
-Return one JSON object and no prose. Use only the supplied documents and canonical-ID registry.
-
-Allowed entity types: COMPANY, FACILITY, COMPONENT, PRODUCT.
-Allowed directed edges: COMPANY OPERATES FACILITY; FACILITY MANUFACTURES COMPONENT;
-COMPONENT USED_IN PRODUCT. Put the relationship type first in `keywords`.
-
-The object must contain: document_id, file_path, snapshot_effective_date, chunks, entities,
-relationships. Every entity and relationship must cite a source_id for a chunk in `chunks`.
-Every chunk must contain chunk_id, content, chunk_order_index, and file_path. Every entity must
-contain entity_name (canonical ID), entity_type, description, source_id, and file_path. Every
-relationship must contain src_id, tgt_id, keywords, description, source_id, file_path, and weight.
-
-Extract direct documented claims only. Do not infer missing dependencies, alternatives, capacity,
-inventory, orders, delays, severity, forecasts, or business impact. Never resolve an ambiguous
-name. Reuse a canonical ID only when the registry permits it or the document directly states it.
-If a document does not support a relationship, omit that relationship rather than completing a path.
-Preserve source wording in coherent evidence chunks. Use the supplied snapshot date in descriptions."""
+        system = load_extraction_skill()
         source_bundle = {
             "snapshot_effective_date": snapshot_effective_date,
             "canonical_id_registry": registry,
