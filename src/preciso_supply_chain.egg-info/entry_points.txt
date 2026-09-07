@@ -1,0 +1,2 @@
+[console_scripts]
+supply-center-api = preciso_supply_agent.api:main

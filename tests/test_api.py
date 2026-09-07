@@ -39,6 +39,9 @@ class FakeExtractor:
         )
         return {"status": "success", "payload": {"document_id": "extracted"}}
 
+    async def answer(self, question, investigation):
+        return {"status": "success", "answer": f"Grounded: {question}"}
+
 
 @pytest.fixture
 def fake_backend() -> FakeBackend:
@@ -192,6 +195,19 @@ async def test_provider_configuration_is_runtime_only_and_never_echoes_key(extra
         "model": "claude-sonnet-5",
     }
     assert "local-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_grounded_answer_uses_the_configured_extractor(extraction_app: Any) -> None:
+    app, _ = extraction_app
+    response = await request(
+        app,
+        "POST",
+        "/api/grounded-answer",
+        json={"question": "Which products are exposed?", "investigation": {"status": "success"}},
+    )
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Grounded: Which products are exposed?"
 
 
 def test_local_env_loader_keeps_existing_environment(

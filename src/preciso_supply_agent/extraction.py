@@ -154,3 +154,52 @@ Preserve source wording in coherent evidence chunks. Use the supplied snapshot d
             "usage": body.get("usage", {}),
             "notice": "Model output is untrusted until reviewed and accepted by Preciso validation.",
         }
+
+    async def answer(self, question: str, investigation: dict[str, Any]) -> dict[str, Any]:
+        """Synthesize a user-facing answer from PRECISO evidence only."""
+        if not self.configured:
+            raise ExtractionError(
+                "Claude grounded answers are not configured. Set ANTHROPIC_API_KEY "
+                "on the API process."
+            )
+        system = """You are the PRECISO Supply Chain Agent. Answer the user's question using only
+the PRECISO investigation result supplied below. PRECISO is the source of graph truth.
+Distinguish documented facts, persisted relationships, and derived dependency paths.
+Never invent companies, facilities, products, relationships, evidence, delays, severity,
+inventory, capacity, or business impact. If the evidence is insufficient, say so.
+Keep the answer concise. Include the dependency path and cite source file/chunk identifiers
+when present. State that exposure is potential and hypothetical when the scenario says so.
+Return plain text only, with no JSON and no markdown code fence."""
+        request_body = {
+            "model": self.model,
+            "max_tokens": 1800,
+            "system": system,
+            "messages": [{
+                "role": "user",
+                "content": "Question:\n" + question + "\n\nPRECISO investigation result:\n"
+                + json.dumps(investigation, ensure_ascii=False),
+            }],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    self.endpoint,
+                    headers={
+                        "x-api-key": str(self.api_key),
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json=request_body,
+                )
+                response.raise_for_status()
+                body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ExtractionError(f"Claude grounded answer request failed: {exc}") from exc
+        answer = "".join(
+            block.get("text", "")
+            for block in body.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        if not answer:
+            raise ExtractionError("Claude returned an empty grounded answer")
+        return {"status": "success", "answer": answer, "model": self.model, "usage": body.get("usage", {})}

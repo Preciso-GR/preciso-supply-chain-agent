@@ -117,6 +117,15 @@ class ChatRequest(BaseModel):
     max_paths: int = Field(default=100, ge=1, le=MAX_PATHS)
 
 
+class GroundedAnswerRequest(BaseModel):
+    """Question plus an authoritative PRECISO investigation result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=2000)
+    investigation: dict[str, Any]
+
+
 class Extractor(Protocol):
     configured: bool
 
@@ -264,6 +273,13 @@ def create_app(
             "facility_name": intent["facility_name"],
             "result": result,
         }
+
+    @app.post("/api/grounded-answer")
+    async def grounded_answer(request: GroundedAnswerRequest) -> dict[str, Any]:
+        try:
+            return await current_extractor().answer(request.question, request.investigation)
+        except ExtractionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return app
 
