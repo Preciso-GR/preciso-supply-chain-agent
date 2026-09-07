@@ -28,6 +28,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "preciso_supply_agent.agent" = ["*.md", "prompts/*.md"]
+"preciso_supply_agent" = ["resources/*.json"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

@@ -9,49 +9,42 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EXTRACTION_SKILL_PATH = REPOSITORY_ROOT / "skills" / "preciso-supply-center-extraction" / "SKILL.md"
-REGISTRY_PATH = REPOSITORY_ROOT / "fixtures" / "supply_chain" / "canonical_id_registry.json"
-AGENT_ROOT = Path(__file__).resolve().parent / "agent"
-SYSTEM_PROMPT_PATH = AGENT_ROOT / "system_prompt.md"
-EXTRACTION_PROMPT_PATH = AGENT_ROOT / "prompts" / "extraction.md"
-REPAIR_PROMPT_PATH = AGENT_ROOT / "prompts" / "repair.md"
-GROUNDED_ANSWER_PROMPT_PATH = AGENT_ROOT / "prompts" / "grounded_answer.md"
+PACKAGE = "preciso_supply_agent"
 
 
 class ExtractionError(RuntimeError):
     """Raised when the configured extraction provider cannot produce a payload."""
 
 
-def load_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _package_text(*parts: str) -> str:
+    return resources.files(PACKAGE).joinpath(*parts).read_text(encoding="utf-8")
 
 
-def load_extraction_skill(path: Path = EXTRACTION_SKILL_PATH) -> str:
-    """Load the repo-local extraction contract used in the Claude system prompt."""
-    return path.read_text(encoding="utf-8")
+def load_registry(path: Path | None = None) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8") if path else _package_text("resources", "canonical_id_registry.json"))
 
 
-def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
-    return path.read_text(encoding="utf-8")
+def load_extraction_skill(path: Path | None = None) -> str:
+    """Load the packaged extraction contract used in the Claude system prompt."""
+    if path:
+        return path.read_text(encoding="utf-8")
+    return _package_text("agent", "prompts", "extraction.md")
+
+
+def load_system_prompt(path: Path | None = None) -> str:
+    return path.read_text(encoding="utf-8") if path else _package_text("agent", "system_prompt.md")
 
 
 def load_agent_prompt(name: str) -> str:
-    paths = {
-        "extraction": EXTRACTION_PROMPT_PATH,
-        "repair": REPAIR_PROMPT_PATH,
-        "grounded_answer": GROUNDED_ANSWER_PROMPT_PATH,
-    }
-    try:
-        return paths[name].read_text(encoding="utf-8")
-    except KeyError as exc:  # pragma: no cover - developer error
-        raise ValueError(f"Unknown Supply Center prompt: {name}") from exc
+    if name not in {"extraction", "repair", "grounded_answer"}:
+        raise ValueError(f"Unknown Supply Center prompt: {name}")
+    return _package_text("agent", "prompts", f"{name}.md")
 
 
 def _extract_json(raw_output: str) -> dict[str, Any]:
@@ -81,7 +74,7 @@ class ClaudeExtractor:
     endpoint: str = "https://api.anthropic.com/v1/messages"
 
     @classmethod
-    def from_environment(cls) -> "ClaudeExtractor":
+    def from_environment(cls) -> ClaudeExtractor:
         return cls(
             api_key=os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY"),
             model=os.getenv("SUPPLY_CENTER_CLAUDE_MODEL", "claude-sonnet-5").strip()
@@ -243,6 +236,8 @@ class ClaudeExtractor:
         snapshot_effective_date: str,
         registry: dict[str, Any],
     ) -> dict[str, Any]:
+        """Ask Claude for one structured patch, never a replacement payload."""
+
         source = {
             "snapshot_effective_date": snapshot_effective_date,
             "canonical_id_registry": registry,
@@ -259,15 +254,17 @@ class ClaudeExtractor:
             timeout=180.0,
             error_prefix="Claude extraction repair request failed",
         )
-        payload = self._normalize_document_payload(
-            _extract_json(raw_output), document, snapshot_effective_date
-        )
+        patch = _extract_json(raw_output)
+        if isinstance(patch.get("patch"), dict):
+            patch = patch["patch"]
+        if "operation" not in patch:
+            raise ExtractionError("Claude repair output must contain a structured patch operation")
         return {
             "status": "success",
             "provider": "anthropic",
             "model": self.model,
             "raw_output": raw_output,
-            "payload": payload,
+            "patch": patch,
             "usage": body.get("usage", {}),
         }
 
