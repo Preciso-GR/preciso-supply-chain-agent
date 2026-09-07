@@ -73,7 +73,7 @@ function renderExecution() {
 function renderApproval() {
   if (!state.run?.awaiting_approval) return ''
   const sources = state.run.interrupts?.[0]?.sources || []
-  return `<article class="assistant-card processing-card approval-card"><div class="assistant-intro"><span class="agent-mark">✦</span><div><p>Validated extraction artifacts are ready. Review each independent source before additive ingestion.</p></div></div><div class="approval-list">${sources.map(source => `<div><b>${escapeHTML(source.source_name)}</b><small>${escapeHTML(source.artifact_name)} · ${source.entities} entities · ${source.relationships} relationships · validated</small></div>`).join('')}</div><button class="outline-button approve-button" data-action="approve">${icon('check', 17)}Approve &amp; build graph</button></article>`
+  return `<article class="assistant-card processing-card approval-card"><div class="assistant-intro"><span class="agent-mark">✦</span><div><p>Validated extraction artifacts are ready. Review each independent source before additive ingestion.</p></div></div><div class="approval-list">${sources.map(source => `<div><b>${escapeHTML(source.source_name)}</b><small>${escapeHTML(source.artifact_name)} · ${source.entities} entities · ${source.relationships} relationships · validated</small></div>`).join('')}</div><div class="completion-actions"><button class="outline-button approve-button" data-action="approve">${icon('check', 17)}Approve &amp; build graph</button><button class="outline-button" data-action="reject">Reject</button></div></article>`
 }
 
 function resultMessage() {
@@ -201,6 +201,7 @@ function bindEvents() {
   document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { state.tab = button.dataset.tab; render() }))
   document.querySelectorAll('[data-action="upload"]').forEach(button => button.addEventListener('click', () => document.querySelector('#source-upload')?.click()))
   document.querySelector('[data-action="approve"]')?.addEventListener('click', () => approveRun(true))
+  document.querySelector('[data-action="reject"]')?.addEventListener('click', () => approveRun(false))
   document.querySelector('#source-upload')?.addEventListener('change', async event => {
     const files = Array.from(event.target.files || [])
     try {

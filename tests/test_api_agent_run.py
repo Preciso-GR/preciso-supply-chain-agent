@@ -190,3 +190,28 @@ async def test_api_extraction_instruction_finishes_without_graph_query(tmp_path:
         "no graph question was requested."
     )
     assert not any(name == "query_graph_tool" for name, _ in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_rejection_resumes_the_checkpoint_without_ingestion(tmp_path: Path) -> None:
+    backend = Backend()
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[Backend]:
+        yield backend
+
+    app = create_app(factory, extractor=Extractor(), registry={"entities": []}, artifact_dir=tmp_path / "extractions")
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = await client.post(
+                "/api/runs",
+                json={"message": "Build the graph", "documents": [{"name": "source.md", "content": "fact"}]},
+            )
+            run = started.json()
+            await wait_for_run(app, run["run_id"])
+            rejected = await client.post(f"/api/runs/{run['thread_id']}/approval", json={"approved": False})
+            assert rejected.json()["run_id"] == run["run_id"]
+            await wait_for_run(app, run["run_id"])
+
+    assert not any(name == "ingest_from_file" for name, _ in backend.calls)
