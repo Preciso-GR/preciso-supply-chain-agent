@@ -73,6 +73,7 @@ class PrecisoMCPClient:
         self.config = config or PrecisoMCPConfig.from_environment()
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
+        self.tool_names: frozenset[str] = frozenset()
 
     async def __aenter__(self) -> Self:
         self._stack = AsyncExitStack()
@@ -94,8 +95,8 @@ class PrecisoMCPClient:
                 ClientSession(read_stream, write_stream)
             )
             await self._session.initialize()
-            discovered = {tool.name for tool in (await self._session.list_tools()).tools}
-            missing = REQUIRED_TOOLS - discovered
+            self.tool_names = frozenset(tool.name for tool in (await self._session.list_tools()).tools)
+            missing = REQUIRED_TOOLS - self.tool_names
             if missing:
                 raise PrecisoMCPError(
                     f"Bundled PRECISO MCP server is missing required tools: {', '.join(sorted(missing))}"
@@ -119,6 +120,7 @@ class PrecisoMCPClient:
             await self._stack.__aexit__(exc_type, exc, traceback)
         self._stack = None
         self._session = None
+        self.tool_names = frozenset()
 
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._session is None:
