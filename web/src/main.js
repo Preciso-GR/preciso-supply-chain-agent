@@ -1,3 +1,5 @@
+import DOMPurify from 'dompurify'
+import { marked } from 'marked'
 import './style.css'
 
 const app = document.querySelector('#app')
@@ -14,6 +16,7 @@ const icon = (name, size = 18) => {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`
 }
 const escapeHTML = (value) => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;')
+const renderMarkdown = (value) => DOMPurify.sanitize(marked.parse(String(value ?? ''), { gfm: true, breaks: true }))
 const api = async (path, options = {}) => {
   const response = await fetch(path, { ...options, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) } })
   const body = await response.json().catch(() => ({}))
@@ -83,7 +86,7 @@ function resultMessage() {
   const heading = extractionOnly ? 'Extraction complete.' : 'PRECISO answer.'
   const description = extractionOnly ? 'The approved source artifacts are now persisted in PRECISO.' : 'Claude grounded this answer in persisted graph evidence.'
   const completionCopy = extractionOnly ? 'No graph question was requested.' : evidence.length ? `Evidence returned from ${evidence.length} PRECISO evidence item${evidence.length === 1 ? '' : 's'}.` : 'The graph returned no directly citable evidence items.'
-  return `<article class="assistant-card completion-card"><div class="assistant-intro"><span class="agent-mark success">${icon('check', 18)}</span><div><h2>${heading}</h2><p>${description}</p></div><time>Live</time></div><p class="grounded-answer">${escapeHTML(state.run.answer)}</p><p class="completion-copy">${completionCopy}</p><div class="completion-actions"><button class="outline-button" data-tab="Graph">${icon('graph', 17)}View graph <span>→</span></button></div></article>`
+  return `<article class="assistant-card completion-card"><div class="assistant-intro"><span class="agent-mark success">${icon('check', 18)}</span><div><h2>${heading}</h2><p>${description}</p></div><time>Live</time></div><div class="grounded-answer markdown-content">${renderMarkdown(state.run.answer)}</div><p class="completion-copy">${completionCopy}</p><div class="completion-actions"><button class="outline-button" data-tab="Graph">${icon('graph', 17)}View graph <span>→</span></button></div></article>`
 }
 
 function renderMessages() {
@@ -91,7 +94,8 @@ function renderMessages() {
     const title = state.graphReady ? 'Graph ready.' : state.files.length ? 'Documents ready.' : 'Start with a question or source documents.'
     return `<div class="empty-thread"><span>${title}</span><p>${state.graphReady ? 'Ask a supply-chain question about persisted PRECISO knowledge.' : 'Upload source documents and ask one question; the agent will extract, validate, pause for approval, then query PRECISO.'}</p></div>`
   }
-  return state.messages.map(message => message.role === 'user' ? `<article class="user-message"><div class="user-bubble"><p>${escapeHTML(message.text)}</p>${renderFileChips(message.files)}</div><time>Live</time></article>` : '').join('') + (state.processing ? `<article class="assistant-card processing-card"><div class="assistant-intro"><span class="agent-mark">✦</span><p>The LangGraph run is executing and its checkpointed events are streaming below.</p></div>${renderExecution()}</article>` : renderApproval() + resultMessage())
+  const liveAnswer = state.processing && state.run?.answer ? resultMessage() : ''
+  return state.messages.map(message => message.role === 'user' ? `<article class="user-message"><div class="user-bubble"><p>${escapeHTML(message.text)}</p>${renderFileChips(message.files)}</div><time>Live</time></article>` : '').join('') + (state.processing ? `<article class="assistant-card processing-card"><div class="assistant-intro"><span class="agent-mark">✦</span><p>The LangGraph run is executing and its checkpointed events are streaming below.</p></div>${renderExecution()}</article>${liveAnswer}` : renderApproval() + resultMessage())
 }
 
 function renderComposer() {
@@ -124,6 +128,12 @@ function openEventStream(run) {
   if (state.eventSource) state.eventSource.close()
   if (!run.events_url) return
   state.eventSource = new EventSource(run.events_url)
+  state.eventSource.addEventListener('answer.token', event => {
+    const text = JSON.parse(event.data).data?.text
+    if (typeof text !== 'string') return
+    state.run = { ...(state.run || {}), answer: text }
+    render()
+  })
   Object.keys(eventLabels).forEach(type => state.eventSource.addEventListener(type, event => {
     const next = JSON.parse(event.data)
     if (!state.events.some(existing => existing.timestamp === next.timestamp && existing.type === next.type)) state.events.push(next)
