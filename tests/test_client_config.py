@@ -11,6 +11,8 @@ def test_default_mcp_config_uses_bundled_engine(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setenv("SUPPLY_CENTER_ROOT", str(tmp_path))
     monkeypatch.delenv("PRECISO_MCP_CWD", raising=False)
     monkeypatch.delenv("PRECISO_MCP_COMMAND", raising=False)
+    monkeypatch.delenv("PRECISO_MCP_ARGS", raising=False)
+    monkeypatch.delenv("GRAPHRAG_MCP_WORKDIR", raising=False)
 
     config = PrecisoMCPConfig.from_environment()
 

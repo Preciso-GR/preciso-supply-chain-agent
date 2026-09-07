@@ -1,83 +1,37 @@
 # SUPPLY CENTER
 
-Local-first, evidence-backed supply-chain investigation for analysts.
+Local-first, evidence-backed supply-chain investigation. This is one repository:
+the bundled PRECISO GraphRAG engine lives in `engine/preciso-graphrag` at
+`710ba66d929fa85b449e6ba256dcbd04f7e891c9`.
 
-Backed by PRECISO, the authoritative GraphRAG/MCP engine pinned at
-[`bfb009ba70d888d7360b2cb4f0adb8bb55368e21`](https://github.com/Preciso-GR/preciso-graphrag/commit/bfb009ba70d888d7360b2cb4f0adb8bb55368e21).
+## Architecture
 
-SUPPLY CENTER is the application and analyst experience. This repository intentionally contains
-no duplicate graph store, extraction engine, or dependency traversal. Those responsibilities
-remain in the pinned PRECISO engine.
+Claude proposes extractions and minimal repairs. LangGraph owns lifecycle and
+approval interrupts. Supply Center owns uploaded sources, extraction artifacts,
+conversations, and live SSE events. PRECISO validates, embeds, merges, stores,
+retrieves, and returns graph evidence. Human approval is required before graph
+persistence.
 
-## Current application
+```text
+source -> extraction artifact -> PRECISO validation -> repair if needed
+-> human approval -> PRECISO ingest_from_file -> query_graph_tool -> evidence
+-> Claude grounded answer
+```
 
-The responsive web experience is now framed as a supply-chain analyst console:
+There is no browser or legacy HTTP path that mutates PRECISO outside this
+workflow. One source produces one extraction artifact. Follow-up turns send
+source IDs, never raw document content again.
 
-- a working home screen with a `Get Started` entry into the analyst chat;
-- a setup panel for PRECISO MCP status, source documents, and local LLM provider setup;
-- a conversation-first analyst workspace for supported dependency-tracing questions;
-- local text-document upload for Markdown, text, CSV, and JSON sources;
-- runtime Anthropic/Claude extraction configuration kept only in the local API process;
-- relationship review controls before ingestion;
-- evidence and source-chunk inspection;
-- explicit MCP, provider, extraction, ingestion, and evidence states.
-
-The stateful `/api/runs` workflow is backed by an explicit LangGraph
-`StateGraph`. It persists conversation and workflow state with the SQLite
-LangGraph checkpointer, pauses with a real LangGraph interrupt before
-ingestion, resumes with the same conversation/thread ID, and exposes the
-checkpointed execution events through `/api/runs/{thread_id}/events`.
-
-The normal LangGraph workflow delegates these operations to PRECISO:
-
-- `get_server_status(workspace="supply_chain")`
-- `validate_extraction(file_path=..., workspace="supply_chain")`
-- `ingest_from_file(file_path=..., workspace="supply_chain")`
-- `query_graph_tool(query=..., mode="mix", workspace="supply_chain")`
-
-The older `/api/ingest`, `/api/investigate`, and `/api/chat` routes remain
-compatibility adapters for existing clients; new browser sessions use the
-LangGraph run endpoints.
-
-Every uploaded source is extracted and written independently as
-`{source_stem}_extracted.json`. Supply Center owns these artifacts and review
-state; PRECISO owns validation, merging, embeddings, persistence, retrieval,
-and evidence. There is no Supply Center embedding or vector-store layer.
-
-The backend returns ordered facility → component → product paths, source excerpts for
-every edge, snapshot metadata, and truncation/completeness. It does not predict delay,
-inventory shortage, production stoppage, severity, or financial impact.
-
-The browser keeps the local conversation and the latest untouched model output in local storage.
-Relationships are never ingested until they are explicitly accepted in the review list and pass
-PRECISO's strict supply-chain validation. Authentication and multi-user durable sessions are
-intentionally outside this prototype. The UI no longer preloads a synthetic Northbridge fixture;
-analysts start from their own documents and the configured PRECISO MCP workspace.
-
-## Development setup
-
-Install Preciso GraphRAG at the pinned commit in a separate checkout, then install this
-application package:
+## Setup
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-export PRECISO_MCP_CWD=/absolute/path/to/preciso-graphrag
-export PRECISO_MCP_COMMAND=python3
-export PRECISO_MCP_ARGS='-m preciso_mcp.server'
-export GRAPHRAG_MCP_WORKDIR=/absolute/path/to/preciso-supply-chain/data/preciso
-export GRAPHRAG_EMBEDDING_PROVIDER=fallback
-export SUPPLY_CENTER_CLAUDE_MODEL=claude-sonnet-5
-supply-center-api
+cp .env.example .env
+.venv/bin/supply-center-api
 ```
 
-The local API reads `.env` on startup for development, without overriding variables already
-exported in the shell. You can also enter an Anthropic key in the Supply Center setup panel; it is
-held in memory by the local API process and is not returned to the browser or written to disk.
-Never place the key in `web/`; Vite client variables are visible to the browser.
-
-The client starts the configured Preciso MCP stdio server; it does not reimplement
-backend behavior. In a second terminal, start the web application:
+In another terminal:
 
 ```bash
 cd web
@@ -85,18 +39,53 @@ npm install
 npm run dev
 ```
 
-Vite proxies `/api` to the local SUPPLY CENTER API on `127.0.0.1:8765`. The fallback embedding
-is suitable for reproducible local development, not an Ollama embedding evaluation. Without an
-Anthropic key, fresh model extraction is disabled; ingestion and deterministic investigation
-still depend on reviewed graph payloads accepted by PRECISO.
+The API automatically launches `engine/preciso-graphrag/scripts/mcp_launcher.sh`.
+No separate PRECISO checkout or `PRECISO_MCP_CWD` is needed. Set
+`ANTHROPIC_API_KEY` for fresh Claude extraction and grounded answers.
 
-Product reverse tracing, shared-dependency analysis, data-gap claims, forecasting,
-inventory, and live monitoring are not implemented here.
+PRECISO uses Ollama embeddings by default (`mxbai-embed-large`). Run Ollama and
+pull that model for semantic GraphRAG. Without Ollama, status is degraded and
+fallback dimensional behavior is useful only for plumbing, not retrieval-quality
+evaluation.
+
+## Runtime files
+
+- `engine/preciso-graphrag`: vendored engine source; do not store user data here.
+- `data/preciso/supply_chain`: graph, vectors, evidence, and manifests.
+- `uploads`: application-owned raw source records.
+- `.runtime/extractions`: Supply Center extraction artifacts and checkpoints.
+
+Graph data persists across application restarts. Runtime directories are ignored
+by Git.
+
+## Supported sources
+
+Markdown (`.md`), text (`.txt`), CSV (`.csv`), and JSON (`.json`) are supported.
+PDF is not currently supported.
+
+## MCP contract
+
+Startup requires and verifies:
+
+- `get_server_status`
+- `validate_extraction`
+- `ingest_from_file`
+- `query_graph_tool`
+
+The browser starts a run then connects to `/api/events/{run_id}`. Events come
+from actual LangGraph node execution and the stream closes at completion or the
+approval pause; resuming approval starts a new live stream for the same run.
 
 ## Verification
 
 ```bash
-python3 -m pytest
-python3 -m ruff check src tests
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check src tests
 cd web && npm run build
+.venv/bin/python -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheels
+RUN_BUNDLED_MCP_INTEGRATION=1 .venv/bin/python -m pytest tests/test_bundled_mcp_integration.py
 ```
+
+The bundled integration test validates real MCP discovery and the runtime data
+location. A full three-document Panasonic acceptance test additionally requires
+an Anthropic key and a healthy local Ollama embedding model.
