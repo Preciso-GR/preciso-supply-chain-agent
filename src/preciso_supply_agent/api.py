@@ -28,6 +28,7 @@ from preciso_supply_agent.agent.graph import AgentDependencies
 from preciso_supply_agent.agent.runtime import RunSnapshot, SupplyAgentRuntime
 from preciso_supply_agent.application import SupplyChainApplication, SupplyChainBackend
 from preciso_supply_agent.client import PrecisoMCPClient, PrecisoMCPConfig
+from preciso_supply_agent.documents.store import SourceStore
 from preciso_supply_agent.extraction import ClaudeExtractor, ExtractionError, load_registry
 from preciso_supply_agent.intent import resolve_chat_intent
 
@@ -36,6 +37,7 @@ MAX_DOCUMENTS = 8
 MAX_DOCUMENT_CHARACTERS = 250_000
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXTRACTION_ARTIFACT_DIR = REPOSITORY_ROOT / ".runtime" / "extractions"
+DEFAULT_UPLOAD_DIR = REPOSITORY_ROOT / "uploads"
 EXTRACTION_ARTIFACT_NAME = "preciso_extract.json"
 
 
@@ -136,6 +138,7 @@ class AgentRunRequest(BaseModel):
     conversation_id: str | None = Field(default=None, min_length=1, max_length=160)
     snapshot_effective_date: date = Field(default_factory=date.today)
     documents: list[SourceDocument] | None = Field(default=None, max_length=MAX_DOCUMENTS)
+    source_ids: list[str] | None = Field(default=None, max_length=MAX_DOCUMENTS)
 
 
 class ApprovalRequest(BaseModel):
@@ -208,6 +211,7 @@ def create_app(
     extractor: Extractor | None = None,
     registry: dict[str, Any] | None = None,
     artifact_dir: Path | None = None,
+    upload_dir: Path | None = None,
 ) -> FastAPI:
     """Create the local API with an injectable MCP backend factory.
 
@@ -222,6 +226,7 @@ def create_app(
     extraction_service = extractor or ClaudeExtractor.from_environment()
     canonical_registry = registry or load_registry()
     extraction_artifact_dir = artifact_dir or DEFAULT_EXTRACTION_ARTIFACT_DIR
+    source_store = SourceStore(upload_dir or DEFAULT_UPLOAD_DIR)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -274,6 +279,13 @@ def create_app(
                 }
             )
         return records
+
+    @app.post("/api/sources")
+    async def upload_sources(documents: list[SourceDocument]) -> dict[str, Any]:
+        try:
+            return {"sources": [source_store.create(name=item.name, content=item.content) for item in documents]}
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     def public_state(snapshot: RunSnapshot) -> dict[str, Any]:
         state = dict(snapshot.state)
@@ -462,7 +474,14 @@ def create_app(
             "snapshot_effective_date": request.snapshot_effective_date.isoformat(),
             "messages": [{"role": "user", "content": request.message}],
         }
-        if request.documents is not None:
+        if request.source_ids is not None and request.documents is not None:
+            raise HTTPException(status_code=422, detail="Submit documents or source_ids, not both")
+        if request.source_ids is not None:
+            try:
+                initial["uploaded_sources"] = [source_store.get(source_id) for source_id in request.source_ids]
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=404, detail=f"Unknown source: {exc}") from exc
+        elif request.documents is not None:
             initial["uploaded_sources"] = source_records(request.documents)
         run_id = await agent_runtime().start(thread_id, initial)
         return started_run_response(thread_id=thread_id, run_id=run_id)

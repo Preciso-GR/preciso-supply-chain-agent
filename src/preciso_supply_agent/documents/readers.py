@@ -5,10 +5,10 @@ from __future__ import annotations
 import csv
 import io
 import json
+from pathlib import Path
 from typing import Any
 
 from preciso_supply_agent.agent.state import SourceRecord
-
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".csv", ".json"}
 
@@ -21,7 +21,8 @@ def read_source(source: SourceRecord) -> dict[str, Any]:
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported source format: {extension or name}")
 
-    content = source["content"]
+    storage_path = source.get("storage_path")
+    content = Path(storage_path).read_text(encoding="utf-8") if storage_path else source["content"]
     result: dict[str, Any] = {
         "source_id": source["source_id"],
         "name": name,

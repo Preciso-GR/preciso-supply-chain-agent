@@ -153,13 +153,13 @@ function openEventStream(run) {
 }
 
 async function startRun(question) {
-  const files = state.files.filter(file => file.content)
+  const files = state.files
   state.messages.push({ role: 'user', text: question, files })
   state.processing = true
   state.error = ''
   render()
   try {
-    const run = await api('/api/runs', { method: 'POST', body: JSON.stringify({ message: question, conversation_id: state.threadId, snapshot_effective_date: new Date().toISOString().slice(0, 10), ...(files.length ? { documents: files.map(file => ({ name: file.name, content: file.content })) } : {}) }) })
+    const run = await api('/api/runs', { method: 'POST', body: JSON.stringify({ message: question, conversation_id: state.threadId, snapshot_effective_date: new Date().toISOString().slice(0, 10), ...(files.length ? { source_ids: files.map(file => file.source_id) } : {}) }) })
     state.events = []
     consumeRun(run)
     openEventStream(run)
@@ -203,7 +203,15 @@ function bindEvents() {
   document.querySelector('[data-action="approve"]')?.addEventListener('click', () => approveRun(true))
   document.querySelector('#source-upload')?.addEventListener('change', async event => {
     const files = Array.from(event.target.files || [])
-    state.files = await Promise.all(files.map(async file => ({ name: file.name, type: file.name.split('.').pop().toUpperCase(), size: `${Math.max(1, Math.ceil(file.size / 1024))} KB`, content: await file.text() })))
+    try {
+      const documents = await Promise.all(files.map(async file => ({ name: file.name, content: await file.text() })))
+      const uploaded = await api('/api/sources', { method: 'POST', body: JSON.stringify(documents) })
+      state.files = uploaded.sources.map(source => ({ ...source, type: source.extension.slice(1).toUpperCase(), size: `${Math.max(1, Math.ceil(source.size / 1024))} KB` }))
+    } catch (error) {
+      state.error = error.message
+      render()
+      return
+    }
     state.graphReady = false
     state.run = null
     state.events = []
