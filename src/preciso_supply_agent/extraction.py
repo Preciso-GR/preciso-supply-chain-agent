@@ -18,6 +18,11 @@ import httpx
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXTRACTION_SKILL_PATH = REPOSITORY_ROOT / "skills" / "preciso-supply-center-extraction" / "SKILL.md"
 REGISTRY_PATH = REPOSITORY_ROOT / "fixtures" / "supply_chain" / "canonical_id_registry.json"
+AGENT_ROOT = Path(__file__).resolve().parent / "agent"
+SYSTEM_PROMPT_PATH = AGENT_ROOT / "system_prompt.md"
+EXTRACTION_PROMPT_PATH = AGENT_ROOT / "prompts" / "extraction.md"
+REPAIR_PROMPT_PATH = AGENT_ROOT / "prompts" / "repair.md"
+GROUNDED_ANSWER_PROMPT_PATH = AGENT_ROOT / "prompts" / "grounded_answer.md"
 
 
 class ExtractionError(RuntimeError):
@@ -31,6 +36,22 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
 def load_extraction_skill(path: Path = EXTRACTION_SKILL_PATH) -> str:
     """Load the repo-local extraction contract used in the Claude system prompt."""
     return path.read_text(encoding="utf-8")
+
+
+def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def load_agent_prompt(name: str) -> str:
+    paths = {
+        "extraction": EXTRACTION_PROMPT_PATH,
+        "repair": REPAIR_PROMPT_PATH,
+        "grounded_answer": GROUNDED_ANSWER_PROMPT_PATH,
+    }
+    try:
+        return paths[name].read_text(encoding="utf-8")
+    except KeyError as exc:  # pragma: no cover - developer error
+        raise ValueError(f"Unknown Supply Center prompt: {name}") from exc
 
 
 def _extract_json(raw_output: str) -> dict[str, Any]:
@@ -81,39 +102,28 @@ class ClaudeExtractor:
             "model": self.model if self.configured else None,
         }
 
-    async def extract(
+    async def _request(
         self,
-        documents: list[dict[str, str]],
         *,
-        snapshot_effective_date: str,
-        registry: dict[str, Any],
-    ) -> dict[str, Any]:
+        system: str,
+        content: str,
+        max_tokens: int,
+        timeout: float,
+        error_prefix: str,
+    ) -> tuple[dict[str, Any], str]:
         if not self.configured:
             raise ExtractionError(
                 "Claude extraction is not configured. Set ANTHROPIC_API_KEY (or "
                 "CLAUDE_API_KEY) on the API process."
             )
-
-        system = load_extraction_skill()
-        source_bundle = {
-            "snapshot_effective_date": snapshot_effective_date,
-            "canonical_id_registry": registry,
-            "documents": documents,
-        }
         request_body = {
             "model": self.model,
-            "max_tokens": 12000,
+            "max_tokens": max_tokens,
             "system": system,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Extract this source bundle. Do not use outside knowledge.\n"
-                    + json.dumps(source_bundle, ensure_ascii=False),
-                }
-            ],
+            "messages": [{"role": "user", "content": content}],
         }
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     self.endpoint,
                     headers={
@@ -126,14 +136,60 @@ class ClaudeExtractor:
                 response.raise_for_status()
                 body = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise ExtractionError(f"Claude extraction request failed: {exc}") from exc
+            raise ExtractionError(f"{error_prefix}: {exc}") from exc
 
         raw_output = "".join(
             block.get("text", "")
             for block in body.get("content", [])
             if isinstance(block, dict) and block.get("type") == "text"
         )
-        payload = _extract_json(raw_output)
+        return body, raw_output
+
+    @staticmethod
+    def _normalize_document_payload(
+        payload: dict[str, Any], document: dict[str, str], snapshot_effective_date: str
+    ) -> dict[str, Any]:
+        """Keep the model output document-scoped without inventing graph facts."""
+
+        source_id = document.get("source_id", "source")
+        normalized = dict(payload)
+        normalized["document_id"] = f"document:{source_id}"
+        normalized["file_path"] = document["name"]
+        normalized["snapshot_effective_date"] = snapshot_effective_date
+        for chunk in normalized.get("chunks", []):
+            if isinstance(chunk, dict):
+                chunk["file_path"] = document["name"]
+        for item in [*normalized.get("entities", []), *normalized.get("relationships", [])]:
+            if isinstance(item, dict):
+                item["file_path"] = document["name"]
+        return normalized
+
+    async def extract_document(
+        self,
+        document: dict[str, str],
+        *,
+        snapshot_effective_date: str,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Extract one source; multiple documents are never sent in one request."""
+
+        source = {
+            "snapshot_effective_date": snapshot_effective_date,
+            "canonical_id_registry": registry,
+            "document": document,
+        }
+        body, raw_output = await self._request(
+            system=(load_system_prompt() + "\n\n" + load_extraction_skill()),
+            content=load_agent_prompt("extraction")
+            + "\n\nSource document:\n"
+            + json.dumps(source, ensure_ascii=False),
+            max_tokens=12000,
+            timeout=180.0,
+            error_prefix="Claude extraction request failed",
+        )
+        payload = self._normalize_document_payload(
+            _extract_json(raw_output), document, snapshot_effective_date
+        )
         return {
             "status": "success",
             "provider": "anthropic",
@@ -144,6 +200,77 @@ class ClaudeExtractor:
             "notice": "Model output is untrusted until reviewed and accepted by Preciso validation.",
         }
 
+    async def extract(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        snapshot_effective_date: str,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compatibility adapter that still invokes one request per document."""
+
+        if not self.configured:
+            raise ExtractionError(
+                "Claude extraction is not configured. Set ANTHROPIC_API_KEY (or "
+                "CLAUDE_API_KEY) on the API process."
+            )
+
+        results = [
+            await self.extract_document(
+                document,
+                snapshot_effective_date=snapshot_effective_date,
+                registry=registry,
+            )
+            for document in documents
+        ]
+        if len(results) == 1:
+            return results[0]
+        return {
+            "status": "success",
+            "provider": "anthropic",
+            "model": self.model,
+            "results": results,
+            "payloads": [result["payload"] for result in results],
+            "notice": "Each source was extracted independently; payloads remain untrusted until validated.",
+        }
+
+    async def repair_document(
+        self,
+        document: dict[str, str],
+        extraction: dict[str, Any],
+        validation_errors: list[str],
+        *,
+        snapshot_effective_date: str,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        source = {
+            "snapshot_effective_date": snapshot_effective_date,
+            "canonical_id_registry": registry,
+            "document": document,
+            "extraction": extraction,
+            "validation_errors": validation_errors,
+        }
+        body, raw_output = await self._request(
+            system=(load_system_prompt() + "\n\n" + load_extraction_skill()),
+            content=load_agent_prompt("repair")
+            + "\n\nRepair context:\n"
+            + json.dumps(source, ensure_ascii=False),
+            max_tokens=12000,
+            timeout=180.0,
+            error_prefix="Claude extraction repair request failed",
+        )
+        payload = self._normalize_document_payload(
+            _extract_json(raw_output), document, snapshot_effective_date
+        )
+        return {
+            "status": "success",
+            "provider": "anthropic",
+            "model": self.model,
+            "raw_output": raw_output,
+            "payload": payload,
+            "usage": body.get("usage", {}),
+        }
+
     async def answer(self, question: str, investigation: dict[str, Any]) -> dict[str, Any]:
         """Synthesize a user-facing answer from PRECISO evidence only."""
         if not self.configured:
@@ -151,14 +278,7 @@ class ClaudeExtractor:
                 "Claude grounded answers are not configured. Set ANTHROPIC_API_KEY "
                 "on the API process."
             )
-        system = """You are the PRECISO Supply Chain Agent. Answer the user's question using only
-the PRECISO investigation result supplied below. PRECISO is the source of graph truth.
-Distinguish documented facts, persisted relationships, and derived dependency paths.
-Never invent companies, facilities, products, relationships, evidence, delays, severity,
-inventory, capacity, or business impact. If the evidence is insufficient, say so.
-Keep the answer concise. Include the dependency path and cite source file/chunk identifiers
-when present. State that exposure is potential and hypothetical when the scenario says so.
-Return plain text only, with no JSON and no markdown code fence."""
+        system = load_system_prompt() + "\n\n" + load_agent_prompt("grounded_answer")
         request_body = {
             "model": self.model,
             "max_tokens": 1800,
