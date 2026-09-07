@@ -17,3 +17,5 @@ def test_default_mcp_config_uses_bundled_engine(monkeypatch, tmp_path: Path) -> 
     assert config.cwd == engine
     assert config.command == str(launcher)
     assert config.args == ()
+    assert config.env is not None
+    assert config.env["GRAPHRAG_MCP_WORKDIR"] == str(tmp_path / "data" / "preciso")

@@ -51,7 +51,9 @@ class PrecisoMCPConfig:
         raw_args = os.getenv("PRECISO_MCP_ARGS", "")
         args = tuple(shlex.split(raw_args))
         cwd = engine
-        return cls(command=command, args=args, cwd=cwd)
+        environment = dict(os.environ)
+        environment.setdefault("GRAPHRAG_MCP_WORKDIR", str(root / "data" / "preciso"))
+        return cls(command=command, args=args, cwd=cwd, env=environment)
 
 
 def _application_root() -> Path:
