@@ -82,8 +82,8 @@ Return one JSON object and no prose:
 
 ```json
 {
-  "document_id": "bundle:2026-09-07",
-  "file_path": "uploaded-source-bundle",
+  "document_id": "document:stable-source-id",
+  "file_path": "source.md",
   "snapshot_effective_date": "2026-09-07",
   "chunks": [
     {
@@ -115,6 +115,11 @@ Return one JSON object and no prose:
   ]
 }
 ```
+
+The application invokes this skill once per source document. Never combine
+multiple uploaded files into one payload and never use a `bundle:<date>`
+document ID. A document ID must remain stable for that source across retries,
+approval, and additive ingestion.
 
 Required top-level fields are `document_id`, `file_path`, `chunks`, `entities`,
 and `relationships`. Every entity must contain `entity_name`, `entity_type`,
