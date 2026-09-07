@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+import json
+from json import JSONDecodeError
+from pathlib import Path
+from typing import Any
+
+from ingest.parser import parse_markdown_extraction
+from ingest.pipeline import ingest_extracted_json, preflight_extraction
+from ingest.validator import validate_extraction_structure
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SUPPORTED_MARKDOWN_SUFFIXES = {".md", ".txt"}
+SUPPORTED_JSON_SUFFIXES = {".json"}
+
+
+async def ingest_from_file(file_path: str, storage_instances: dict, global_config: dict) -> dict:
+    """
+    Reads a reviewed extraction from disk and additively ingests it into the graph.
+
+    This operation does not replace or remove contributions from an earlier
+    version of a document. Correcting already-ingested content requires a full
+    rebuild from the complete valid corpus.
+
+    Supports:
+      .json files: parsed directly as JSON
+      .md / .txt files: parsed via parse_markdown_extraction()
+
+    Steps:
+      1. Check file exists
+      2. Read and parse based on extension
+      3. Validate payload structure
+      4. Call ingest_extracted_json pipeline
+      5. Return result with file_path in response
+    """
+
+    return await _ingest_file(file_path, storage_instances, global_config)
+
+
+async def reingest_from_file(file_path: str, storage_instances: dict, global_config: dict) -> dict:
+    """
+    Replays an identical extraction after an operational ingestion failure.
+
+    Identical logic to ingest_from_file; this is recovery replay, not document
+    correction or replacement. A changed extraction must not be replayed into
+    the existing graph because ingestion is additive.
+    """
+
+    return await _ingest_file(file_path, storage_instances, global_config)
+
+
+async def validate_extraction(
+    file_path: str, storage_instances: dict, global_config: dict
+) -> dict:
+    """Validate a file with ingestion's non-mutating preflight only."""
+    resolved_path = _resolve_file_path(file_path)
+    workspace = getattr(storage_instances.get("graph"), "workspace", "") or None
+    if not resolved_path.exists() or not resolved_path.is_file():
+        return {
+            "status": "error",
+            "workspace": workspace,
+            "profile": _profile_name(storage_instances, global_config),
+            "file_path": str(file_path),
+            "errors": ["file not found"],
+            "warnings": [],
+        }
+
+    try:
+        payload = _load_payload(resolved_path)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "workspace": workspace,
+            "profile": _profile_name(storage_instances, global_config),
+            "file_path": str(file_path),
+            "errors": [str(exc)],
+            "warnings": [],
+        }
+
+    structure_errors = validate_extraction_structure(payload)
+    if structure_errors:
+        return {
+            "status": "validation_failed",
+            "workspace": workspace,
+            "profile": _profile_name(storage_instances, global_config),
+            "document_id": str(payload.get("document_id", "")).strip() or None,
+            "file_path": str(file_path),
+            "counts": _payload_counts(payload),
+            "errors": structure_errors,
+            "warnings": [],
+        }
+
+    normalized_payload = _normalize_payload(payload, resolved_path)
+    preflight = await preflight_extraction(
+        normalized_payload, storage_instances, global_config
+    )
+    errors = preflight["errors"]
+    return {
+        "status": "valid" if not errors else "validation_failed",
+        "workspace": preflight["workspace"],
+        "profile": preflight["profile"].name,
+        "document_id": preflight["document_id"],
+        "file_path": str(file_path),
+        "counts": preflight["counts"],
+        "errors": errors,
+        "warnings": preflight["warnings"],
+    }
+
+
+async def _ingest_file(file_path: str, storage_instances: dict, global_config: dict) -> dict:
+    resolved_path = _resolve_file_path(file_path)
+    if not resolved_path.exists() or not resolved_path.is_file():
+        return {
+            "status": "error",
+            "file_path": str(file_path),
+            "entities_added": 0,
+            "relationships_added": 0,
+            "chunks_stored": 0,
+            "message": "file not found",
+        }
+
+    try:
+        payload = _load_payload(resolved_path)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "file_path": str(file_path),
+            "entities_added": 0,
+            "relationships_added": 0,
+            "chunks_stored": 0,
+            "message": str(exc),
+        }
+
+    validation_errors = validate_extraction_structure(payload)
+    if validation_errors:
+        return {
+            "status": "validation_failed",
+            "file_path": str(file_path),
+            "entities_added": 0,
+            "relationships_added": 0,
+            "chunks_stored": 0,
+            "errors": validation_errors,
+        }
+
+    normalized_payload = _normalize_payload(payload, resolved_path)
+    result = await ingest_extracted_json(normalized_payload, storage_instances, global_config)
+    ingestion_counts = result.get("ingestion_counts") or {}
+    entity_counts = ingestion_counts.get("entities") or {}
+    relationship_counts = ingestion_counts.get("relationships") or {}
+    chunk_counts = ingestion_counts.get("chunks") or {}
+
+    response = {
+        "status": result.get("status", "error"),
+        "file_path": str(file_path),
+        "entities_added": int(
+            entity_counts.get("added", result.get("entities_merged", 0)) or 0
+        ),
+        "relationships_added": int(
+            relationship_counts.get("added", result.get("relationships_merged", 0)) or 0
+        ),
+        "chunks_stored": int(
+            chunk_counts.get("added", result.get("chunks_ingested", 0)) or 0
+        ),
+    }
+    if ingestion_counts:
+        response["ingestion_counts"] = ingestion_counts
+    if "message" in result:
+        response["message"] = result["message"]
+    if result.get("summary_events"):
+        response["summary_events"] = result["summary_events"]
+    if result.get("errors"):
+        response["errors"] = result["errors"]
+    if "warnings" in result:
+        response["warnings"] = result["warnings"]
+
+    if result.get("status") == "partial_success":
+        response["status"] = "validation_failed"
+    elif result.get("status") == "error":
+        response["message"] = result.get("message", "pipeline error")
+
+    return response
+
+
+def _resolve_file_path(file_path: str) -> Path:
+    candidate = Path(file_path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return PROJECT_ROOT / candidate
+
+
+def _load_payload(resolved_path: Path) -> dict[str, Any]:
+    suffix = resolved_path.suffix.lower()
+    content = resolved_path.read_text(encoding="utf-8")
+
+    if suffix in SUPPORTED_JSON_SUFFIXES:
+        try:
+            payload = json.loads(content)
+        except JSONDecodeError as exc:
+            raise ValueError(f"invalid JSON: {exc.msg}") from exc
+    elif suffix in SUPPORTED_MARKDOWN_SUFFIXES:
+        payload = parse_markdown_extraction(content)
+    else:
+        raise ValueError(f"unsupported file extension: {suffix or '<none>'}")
+
+    if not isinstance(payload, dict):
+        raise ValueError("parsed payload must be a JSON object")
+    return payload
+
+
+def _normalize_payload(payload: dict[str, Any], resolved_path: Path) -> dict[str, Any]:
+    normalized = dict(payload)
+    source_file = str(
+        normalized.get("source_file")
+        or normalized.get("file_path")
+        or _infer_source_file_from_chunks(normalized.get("chunks"))
+        or resolved_path.name
+    )
+    normalized["file_path"] = source_file
+
+    normalized_chunks = []
+    for index, chunk in enumerate(normalized.get("chunks", [])):
+        if not isinstance(chunk, dict):
+            normalized_chunks.append(chunk)
+            continue
+        normalized_chunk = dict(chunk)
+        normalized_chunk.setdefault("chunk_id", f"chunk_{index + 1:03d}")
+        normalized_chunk.setdefault("file_path", source_file)
+        normalized_chunks.append(normalized_chunk)
+    normalized["chunks"] = normalized_chunks
+
+    normalized_entities = []
+    for entity in normalized.get("entities", []):
+        if not isinstance(entity, dict):
+            normalized_entities.append(entity)
+            continue
+        normalized_entity = dict(entity)
+        normalized_entity.setdefault("file_path", source_file)
+        normalized_entities.append(normalized_entity)
+    normalized["entities"] = normalized_entities
+
+    normalized_relationships = []
+    for relationship in normalized.get("relationships", []):
+        if not isinstance(relationship, dict):
+            normalized_relationships.append(relationship)
+            continue
+        normalized_relationship = dict(relationship)
+        normalized_relationship.setdefault("file_path", source_file)
+        normalized_relationships.append(normalized_relationship)
+    normalized["relationships"] = normalized_relationships
+
+    return normalized
+
+
+def _infer_source_file_from_chunks(chunks: Any) -> str | None:
+    if not isinstance(chunks, list):
+        return None
+    for chunk in chunks:
+        if isinstance(chunk, dict):
+            file_path = str(chunk.get("file_path", "")).strip()
+            if file_path:
+                return file_path
+    return None
+
+
+def _payload_counts(payload: dict[str, Any]) -> dict[str, int]:
+    return {
+        "chunks": len(payload.get("chunks", [])) if isinstance(payload.get("chunks"), list) else 0,
+        "entities": len(payload.get("entities", [])) if isinstance(payload.get("entities"), list) else 0,
+        "relationships": len(payload.get("relationships", [])) if isinstance(payload.get("relationships"), list) else 0,
+    }
+
+
+def _profile_name(storage_instances: dict, global_config: dict) -> str:
+    from core.profiles import resolve_dataset_profile
+
+    workspace = getattr(storage_instances.get("graph"), "workspace", "")
+    return resolve_dataset_profile(global_config, workspace).name
