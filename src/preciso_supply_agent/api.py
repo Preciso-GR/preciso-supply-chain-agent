@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import date
+import json
 import os
 from pathlib import Path
 from typing import Any, AsyncContextManager, AsyncIterator, Callable, Literal, Protocol
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from preciso_supply_agent.application import SupplyChainApplication, SupplyChainBackend
@@ -27,6 +29,8 @@ MAX_PATHS = 1000
 MAX_DOCUMENTS = 8
 MAX_DOCUMENT_CHARACTERS = 250_000
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_EXTRACTION_ARTIFACT_DIR = REPOSITORY_ROOT / ".runtime" / "extractions"
+EXTRACTION_ARTIFACT_NAME = "preciso_extract.json"
 
 
 def load_local_env(path: Path = REPOSITORY_ROOT / ".env") -> None:
@@ -159,6 +163,7 @@ def create_app(
     config: PrecisoMCPConfig | None = None,
     extractor: Extractor | None = None,
     registry: dict[str, Any] | None = None,
+    artifact_dir: Path | None = None,
 ) -> FastAPI:
     """Create the local API with an injectable MCP backend factory.
 
@@ -172,6 +177,7 @@ def create_app(
     factory = backend_factory or (lambda: default_backend_factory(config))
     extraction_service = extractor or ClaudeExtractor.from_environment()
     canonical_registry = registry or load_registry()
+    extraction_artifact_dir = artifact_dir or DEFAULT_EXTRACTION_ARTIFACT_DIR
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -233,13 +239,40 @@ def create_app(
         if not extractor_service.configured:
             raise HTTPException(status_code=503, detail=extractor_service.status())
         try:
-            return await extractor_service.extract(
+            result = await extractor_service.extract(
                 [document.model_dump() for document in request.documents],
                 snapshot_effective_date=request.snapshot_effective_date.isoformat(),
                 registry=canonical_registry,
             )
+            extraction_artifact_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = extraction_artifact_dir / EXTRACTION_ARTIFACT_NAME
+            temporary_path = artifact_path.with_suffix(".tmp")
+            temporary_path.write_text(
+                json.dumps(result["payload"], ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(artifact_path)
+            return {
+                **result,
+                "artifact": {
+                    "name": EXTRACTION_ARTIFACT_NAME,
+                    "url": "/api/extractions/preciso_extract.json",
+                    "description": "Exact Claude extraction payload awaiting or accepted by PRECISO.",
+                },
+            }
         except ExtractionError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/extractions/preciso_extract.json")
+    async def get_extraction_artifact() -> FileResponse:
+        artifact_path = extraction_artifact_dir / EXTRACTION_ARTIFACT_NAME
+        if not artifact_path.is_file():
+            raise HTTPException(status_code=404, detail="No extraction artifact has been created yet.")
+        return FileResponse(
+            artifact_path,
+            media_type="application/json",
+            filename=EXTRACTION_ARTIFACT_NAME,
+        )
 
     @app.post("/api/ingest")
     async def ingest(request: ApprovedIngestionRequest) -> dict[str, Any]:

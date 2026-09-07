@@ -58,7 +58,7 @@ def app(fake_backend: FakeBackend):
 
 
 @pytest.fixture
-def extraction_app(fake_backend: FakeBackend):
+def extraction_app(fake_backend: FakeBackend, tmp_path: Path):
     extractor = FakeExtractor()
     registry = {
         "entities": [
@@ -76,7 +76,12 @@ def extraction_app(fake_backend: FakeBackend):
     async def factory() -> AsyncIterator[FakeBackend]:
         yield fake_backend
 
-    return create_app(factory, extractor=extractor, registry=registry), extractor
+    return create_app(
+        factory,
+        extractor=extractor,
+        registry=registry,
+        artifact_dir=tmp_path / "extractions",
+    ), extractor
 
 
 async def request(app, method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -171,6 +176,15 @@ async def test_extract_forwards_only_documents_date_and_server_registry(extracti
     assert extractor.calls[0]["documents"] == [
         {"name": "facility.md", "content": "Northbridge manufactures C-17."}
     ]
+    assert response.json()["artifact"] == {
+        "name": "preciso_extract.json",
+        "url": "/api/extractions/preciso_extract.json",
+        "description": "Exact Claude extraction payload awaiting or accepted by PRECISO.",
+    }
+
+    artifact = await request(app, "GET", "/api/extractions/preciso_extract.json")
+    assert artifact.status_code == 200
+    assert artifact.json() == {"document_id": "extracted"}
 
 
 @pytest.mark.asyncio
