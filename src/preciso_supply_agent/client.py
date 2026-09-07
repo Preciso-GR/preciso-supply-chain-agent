@@ -7,17 +7,21 @@ and dependency queries.
 
 from __future__ import annotations
 
-from contextlib import AsyncExitStack
 import json
 import os
 import shlex
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+REQUIRED_TOOLS = frozenset(
+    {"get_server_status", "validate_extraction", "ingest_from_file", "query_graph_tool"}
+)
 
 class PrecisoMCPError(RuntimeError):
     """Raised when the configured Preciso MCP backend cannot serve a request."""
@@ -27,19 +31,37 @@ class PrecisoMCPError(RuntimeError):
 class PrecisoMCPConfig:
     """How the application starts the pinned Preciso MCP backend."""
 
-    command: str = "python3"
-    args: tuple[str, ...] = ("-m", "preciso_mcp.server")
+    command: str = ""
+    args: tuple[str, ...] = ()
     cwd: Path | None = None
     env: dict[str, str] | None = None
 
     @classmethod
-    def from_environment(cls) -> "PrecisoMCPConfig":
-        command = os.getenv("PRECISO_MCP_COMMAND", "python3").strip() or "python3"
-        raw_args = os.getenv("PRECISO_MCP_ARGS", "-m preciso_mcp.server")
+    def from_environment(cls) -> PrecisoMCPConfig:
+        root = _application_root()
+        engine = Path(
+            os.getenv("PRECISO_MCP_CWD", str(root / "engine" / "preciso-graphrag"))
+        ).expanduser()
+        launcher = engine / "scripts" / "mcp_launcher.sh"
+        if not engine.is_dir():
+            raise PrecisoMCPError(f"Bundled PRECISO engine is missing: {engine}")
+        if not launcher.is_file():
+            raise PrecisoMCPError(f"Bundled PRECISO MCP launcher is missing: {launcher}")
+        command = os.getenv("PRECISO_MCP_COMMAND", str(launcher)).strip() or str(launcher)
+        raw_args = os.getenv("PRECISO_MCP_ARGS", "")
         args = tuple(shlex.split(raw_args))
-        raw_cwd = os.getenv("PRECISO_MCP_CWD", "").strip()
-        cwd = Path(raw_cwd).expanduser() if raw_cwd else None
+        cwd = engine
         return cls(command=command, args=args, cwd=cwd)
+
+
+def _application_root() -> Path:
+    explicit = os.getenv("SUPPLY_CENTER_ROOT", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    for candidate in (Path.cwd(), *Path.cwd().parents):
+        if (candidate / "engine" / "preciso-graphrag").is_dir():
+            return candidate
+    return Path(__file__).resolve().parents[2]
 
 
 class PrecisoMCPClient:
@@ -50,7 +72,7 @@ class PrecisoMCPClient:
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
-    async def __aenter__(self) -> "PrecisoMCPClient":
+    async def __aenter__(self) -> Self:
         self._stack = AsyncExitStack()
         await self._stack.__aenter__()
         parameters = StdioServerParameters(
@@ -70,16 +92,27 @@ class PrecisoMCPClient:
                 ClientSession(read_stream, write_stream)
             )
             await self._session.initialize()
+            discovered = {tool.name for tool in (await self._session.list_tools()).tools}
+            missing = REQUIRED_TOOLS - discovered
+            if missing:
+                raise PrecisoMCPError(
+                    f"Bundled PRECISO MCP server is missing required tools: {', '.join(sorted(missing))}"
+                )
         except Exception as exc:
             await self._stack.aclose()
             self._stack = None
             raise PrecisoMCPError(
-                "Could not connect to the configured Preciso MCP backend. "
-                f"Check PRECISO_MCP_CWD and backend installation: {exc}"
+                "Could not connect to the bundled PRECISO MCP backend. "
+                f"Check the engine launcher and its Python dependencies: {exc}"
             ) from exc
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         if self._stack is not None:
             await self._stack.__aexit__(exc_type, exc, traceback)
         self._stack = None
