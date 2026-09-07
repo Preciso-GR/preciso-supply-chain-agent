@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 import pytest
@@ -92,14 +93,8 @@ async def request(app, method: str, url: str, **kwargs: Any) -> httpx.Response:
 
 
 @pytest.mark.asyncio
-async def test_api_routes_status_ingest_and_investigation(app: Any, fake_backend: FakeBackend) -> None:
+async def test_api_routes_status_and_investigation(app: Any, fake_backend: FakeBackend) -> None:
     status = await request(app, "GET", "/api/status")
-    ingest = await request(
-        app,
-        "POST",
-        "/api/ingest",
-        json={"approved": True, "payload": {"document_id": "reviewed"}},
-    )
     investigation = await request(
         app,
         "POST",
@@ -108,14 +103,9 @@ async def test_api_routes_status_ingest_and_investigation(app: Any, fake_backend
     )
 
     assert status.status_code == 200
-    assert ingest.status_code == 200
     assert investigation.status_code == 200
     assert fake_backend.calls == [
         ("get_server_status", {"workspace": "supply_chain"}),
-        (
-            "ingest_graph_tool",
-            {"payload": {"document_id": "reviewed"}, "workspace": "supply_chain"},
-        ),
         (
             "query_facility_unavailable",
             {
@@ -128,7 +118,7 @@ async def test_api_routes_status_ingest_and_investigation(app: Any, fake_backend
 
 
 @pytest.mark.asyncio
-async def test_ingest_requires_explicit_approval(app: Any, fake_backend: FakeBackend) -> None:
+async def test_legacy_ingest_route_is_unavailable(app: Any, fake_backend: FakeBackend) -> None:
     response = await request(
         app,
         "POST",
@@ -136,7 +126,7 @@ async def test_ingest_requires_explicit_approval(app: Any, fake_backend: FakeBac
         json={"approved": False, "payload": {"document_id": "not-reviewed"}},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 404
     assert fake_backend.calls == []
 
 

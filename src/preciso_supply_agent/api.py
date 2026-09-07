@@ -55,15 +55,6 @@ def load_local_env(path: Path = REPOSITORY_ROOT / ".env") -> None:
             os.environ[key] = value
 
 
-class ApprovedIngestionRequest(BaseModel):
-    """The only ingestion shape accepted by the UI boundary."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    approved: Literal[True]
-    payload: dict[str, Any]
-
-
 class FacilityInvestigationRequest(BaseModel):
     """Facility query request used by the chat workspace."""
 
@@ -414,10 +405,6 @@ def create_app(
         if not artifact_path.is_file():
             raise HTTPException(status_code=404, detail="Extraction artifact not found")
         return FileResponse(artifact_path, media_type="application/json", filename=safe_name)
-
-    @app.post("/api/ingest")
-    async def ingest(request: ApprovedIngestionRequest) -> dict[str, Any]:
-        return await application().ingest_reviewed_extraction(request.payload)
 
     @app.post("/api/investigate")
     async def investigate(request: FacilityInvestigationRequest) -> dict[str, Any]:

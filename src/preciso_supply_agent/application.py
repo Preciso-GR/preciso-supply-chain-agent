@@ -18,9 +18,25 @@ class SupplyChainApplication:
     async def status(self) -> dict[str, Any]:
         return await self.backend.call("get_server_status", {"workspace": "supply_chain"})
 
-    async def ingest_reviewed_extraction(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def validate_extraction(self, file_path: str) -> dict[str, Any]:
+        """Delegate structural validation to PRECISO; do not mirror its rules here."""
         return await self.backend.call(
-            "ingest_graph_tool", {"payload": payload, "workspace": "supply_chain"}
+            "validate_extraction",
+            {"file_path": file_path, "workspace": "supply_chain"},
+        )
+
+    async def ingest_extraction_file(self, file_path: str) -> dict[str, Any]:
+        """Ingest one reviewed artifact through PRECISO's additive file tool."""
+        return await self.backend.call(
+            "ingest_from_file",
+            {"file_path": file_path, "workspace": "supply_chain"},
+        )
+
+    async def query_graph(self, query: str, *, mode: str = "mix") -> dict[str, Any]:
+        """Return PRECISO's graph and evidence context without local retrieval."""
+        return await self.backend.call(
+            "query_graph_tool",
+            {"query": query, "mode": mode, "workspace": "supply_chain"},
         )
 
     async def investigate_facility(
