@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 FACILITY_TERMS = ("unavailable", "exposed", "affected", "impact", "disruption", "facility")
 
 

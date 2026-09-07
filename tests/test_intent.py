@@ -1,6 +1,5 @@
 from preciso_supply_agent.intent import resolve_chat_intent
 
-
 REGISTRY = {
     "entities": [
         {

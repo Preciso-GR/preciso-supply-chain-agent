@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from operator import add
 from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph.message import add_messages
-
 
 Intent = Literal["new_sources", "graph_query", "new_sources_and_query"]
 SourceStatus = Literal[
@@ -75,6 +74,7 @@ class SupplyAgentState(TypedDict, total=False):
     validation_results: dict[str, ValidationResult]
     extraction_errors: dict[str, list[str]]
     extraction_attempts: dict[str, int]
+    repair_history: list[dict[str, Any]]
 
     awaiting_approval: bool
     approved_extraction_ids: list[str]
@@ -103,7 +103,7 @@ def execution_event(
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "type": event_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
     if run_id:
         event["run_id"] = run_id
